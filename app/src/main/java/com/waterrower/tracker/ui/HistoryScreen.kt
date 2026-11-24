@@ -31,6 +31,7 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -44,6 +45,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -55,6 +57,7 @@ import com.waterrower.tracker.ui.theme.LocalRowingColors
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.roundToInt
 
 private enum class HistoryFilter(val label: String) {
     REAL("Echt"),
@@ -66,6 +69,7 @@ private enum class HistoryFilter(val label: String) {
 @Composable
 fun HistoryScreen(
     workouts: List<WorkoutEntity>,
+    weeklyGoalMeters: Int,
     onSelectWorkout: (String) -> Unit,
     onOpenSettings: () -> Unit,
 ) {
@@ -179,8 +183,11 @@ fun HistoryScreen(
                 }
             }
 
-            if (personalBests.hasAnyRecord) {
-                PersonalBestsBanner(bests = personalBests)
+            if (personalBests.hasAnyRecord || weeklyGoalMeters > 0) {
+                PersonalBestsBanner(
+                    bests = personalBests,
+                    weeklyGoalMeters = weeklyGoalMeters,
+                )
             }
 
             if (filteredWorkouts.isEmpty()) {
@@ -346,7 +353,10 @@ fun HistoryScreen(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun PersonalBestsBanner(bests: PersonalBests) {
+private fun PersonalBestsBanner(
+    bests: PersonalBests,
+    weeklyGoalMeters: Int,
+) {
     val colorScheme = MaterialTheme.colorScheme
     val rowingColors = LocalRowingColors.current
 
@@ -377,40 +387,83 @@ private fun PersonalBestsBanner(bests: PersonalBests) {
                 )
             }
 
-            FlowRow(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(20.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                MiniStat(
-                    label = "LETZTE 7 TAGE",
-                    value = "${RowingTelemetry.formatDistance(bests.weeklyDistanceMeters)} (${bests.weeklyWorkoutCount})",
-                    color = rowingColors.distance,
-                )
-                MiniStat(
-                    label = "LÄNGSTE EINHEIT",
-                    value = RowingTelemetry.formatDistance(bests.longestDistanceMeters),
-                )
-                bests.best500mPlusPaceSec?.let { pace ->
-                    MiniStat(
-                        label = "BESTE Ø PACE",
-                        value = "${RowingTelemetry.formatPace(pace)} /500m",
-                        color = rowingColors.pace,
+            if (weeklyGoalMeters > 0) {
+                val fraction = (bests.weeklyDistanceMeters.toFloat() / weeklyGoalMeters.toFloat())
+                    .coerceIn(0f, 1f)
+                val pct = (fraction * 100f).roundToInt()
+                val reached = bests.weeklyDistanceMeters >= weeklyGoalMeters
+                val accent = if (reached) rowingColors.active else colorScheme.primary
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = if (reached) {
+                                "✓ Wochenziel erreicht: ${RowingTelemetry.formatDistance(bests.weeklyDistanceMeters)} / ${RowingTelemetry.formatDistance(weeklyGoalMeters)}"
+                            } else {
+                                "Wochenziel: ${RowingTelemetry.formatDistance(bests.weeklyDistanceMeters)} / ${RowingTelemetry.formatDistance(weeklyGoalMeters)}"
+                            },
+                            style = MaterialTheme.typography.labelLarge,
+                            color = if (reached) rowingColors.active else colorScheme.onSurface,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            text = "$pct%",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = accent,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                    LinearProgressIndicator(
+                        progress = { fraction },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(999.dp)),
+                        color = accent,
+                        trackColor = colorScheme.surfaceContainerHighest,
+                        strokeCap = StrokeCap.Round,
                     )
                 }
-                bests.best2kPaceSec?.let { pace ->
+            }
+
+            if (bests.hasAnyRecord) {
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
                     MiniStat(
-                        label = "PR ≥ 2.000 m",
-                        value = "${RowingTelemetry.formatPace(pace)} /500m",
-                        color = rowingColors.pace,
+                        label = "LETZTE 7 TAGE",
+                        value = "${RowingTelemetry.formatDistance(bests.weeklyDistanceMeters)} (${bests.weeklyWorkoutCount})",
+                        color = rowingColors.distance,
                     )
-                }
-                bests.best5kPaceSec?.let { pace ->
                     MiniStat(
-                        label = "PR ≥ 5.000 m",
-                        value = "${RowingTelemetry.formatPace(pace)} /500m",
-                        color = rowingColors.pace,
+                        label = "LÄNGSTE EINHEIT",
+                        value = RowingTelemetry.formatDistance(bests.longestDistanceMeters),
                     )
+                    bests.best500mPlusPaceSec?.let { pace ->
+                        MiniStat(
+                            label = "BESTE Ø PACE",
+                            value = "${RowingTelemetry.formatPace(pace)} /500m",
+                            color = rowingColors.pace,
+                        )
+                    }
+                    bests.best2kPaceSec?.let { pace ->
+                        MiniStat(
+                            label = "PR ≥ 2.000 m",
+                            value = "${RowingTelemetry.formatPace(pace)} /500m",
+                            color = rowingColors.pace,
+                        )
+                    }
+                    bests.best5kPaceSec?.let { pace ->
+                        MiniStat(
+                            label = "PR ≥ 5.000 m",
+                            value = "${RowingTelemetry.formatPace(pace)} /500m",
+                            color = rowingColors.pace,
+                        )
+                    }
                 }
             }
         }

@@ -275,4 +275,21 @@ class WorkoutFeaturesTest {
         assertEquals(1f, latest.stepProgressFraction, 0.001f)
         assertEquals("Row & KB Swing (Kurz)", latest.storageSummary())
     }
+
+    @Test
+    fun overlaySettings_parsesStylesAndEnablesAutoConnectAndOverlayByDefault() {
+        assertEquals(com.waterrower.tracker.data.OverlayStyle.STANDARD, com.waterrower.tracker.data.OverlayStyle.fromId("standard"))
+        assertEquals(com.waterrower.tracker.data.OverlayStyle.CINEMA, com.waterrower.tracker.data.OverlayStyle.fromId("cinema"))
+        assertEquals(com.waterrower.tracker.data.OverlayStyle.TRANSPARENT, com.waterrower.tracker.data.OverlayStyle.fromId("transparent"))
+        assertEquals(com.waterrower.tracker.data.OverlayStyle.STANDARD, com.waterrower.tracker.data.OverlayStyle.fromId("unknown"))
+        assertEquals(com.waterrower.tracker.data.OverlayStyle.STANDARD, com.waterrower.tracker.data.OverlayStyle.fromId(null))
+
+        val defaults = com.waterrower.tracker.data.OverlaySettings()
+        assertEquals(com.waterrower.tracker.data.OverlayStyle.STANDARD, defaults.overlayStyle)
+        assertFalse(defaults.compactOverlayMode)
+        assertFalse(defaults.overlayPositionLocked)
+        assertTrue(defaults.autoReconnectOnStart)
+        assertTrue(defaults.autoShowOverlayOnConnect)
+        assertEquals(0, defaults.weeklyGoalMeters)
+    }
 }

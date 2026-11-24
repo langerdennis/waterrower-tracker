@@ -60,16 +60,21 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.waterrower.tracker.data.AppPreferences
 import com.waterrower.tracker.data.OverlaySettings
+import com.waterrower.tracker.data.OverlayStyle
 import com.waterrower.tracker.model.BleDiagnostics
 import com.waterrower.tracker.model.ConnectionState
 import com.waterrower.tracker.ui.theme.LocalRowingColors
@@ -81,6 +86,7 @@ import java.util.Locale
 import kotlin.math.roundToInt
 
 private val AUTO_FINISH_OPTIONS = listOf(0, 2, 3, 5)
+private val WEEKLY_GOAL_OPTIONS = listOf(0, 10_000, 15_000, 20_000, 30_000)
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -95,10 +101,16 @@ fun SettingsScreen(
     updateState: UpdateUiState,
     onOpacityChange: (Float) -> Unit,
     onScaleChange: (Float) -> Unit,
+    onOverlayStyleChange: (OverlayStyle) -> Unit,
+    onCompactOverlayChange: (Boolean) -> Unit,
+    onOverlayLockChange: (Boolean) -> Unit,
     onShowWattsInMiniChange: (Boolean) -> Unit,
     onAutoStartChange: (Boolean) -> Unit,
     onAutoFinishMinutesChange: (Int) -> Unit,
     onGoalSoundChange: (Boolean) -> Unit,
+    onAutoReconnectChange: (Boolean) -> Unit,
+    onAutoShowOverlayChange: (Boolean) -> Unit,
+    onWeeklyGoalMetersChange: (Int) -> Unit,
     onResetOverlayPosition: () -> Unit,
     onExportBackup: () -> Unit,
     onImportBackup: () -> Unit,
@@ -133,7 +145,7 @@ fun SettingsScreen(
                 fontWeight = FontWeight.Bold,
             )
 
-            // 1. Floating Overlay Appearance & Position
+            // 1. Floating Overlay Appearance, Cinema Mode & Automation
             Card(
                 colors = CardDefaults.cardColors(containerColor = colorScheme.surfaceContainerLow),
                 shape = MaterialTheme.shapes.medium,
@@ -154,7 +166,7 @@ fun SettingsScreen(
                             tint = colorScheme.primary,
                         )
                         Text(
-                            text = "Floating Overlay",
+                            text = "Floating Overlay & Start",
                             style = MaterialTheme.typography.titleLarge,
                         )
                     }
@@ -181,17 +193,47 @@ fun SettingsScreen(
                             .padding(16.dp),
                     ) {
                         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                            // Live Preview Pill
+                            // Live Preview Pill reflecting Standard / Cinema / Transparent + Compact
+                            val previewBg = when (settings.overlayStyle) {
+                                OverlayStyle.TRANSPARENT -> Color.Transparent
+                                OverlayStyle.CINEMA -> Color(0xFF05070A).copy(alpha = (settings.opacity * 0.72f).coerceIn(0.11f, 0.78f))
+                                OverlayStyle.STANDARD -> Color(0xFF0B121A).copy(alpha = settings.opacity)
+                            }
+                            val previewBorder = when (settings.overlayStyle) {
+                                OverlayStyle.TRANSPARENT -> Color.Transparent
+                                OverlayStyle.CINEMA -> Color(0xFF38BDF8).copy(alpha = (settings.opacity * 0.35f).coerceIn(0.08f, 0.38f))
+                                OverlayStyle.STANDARD -> Color(0xFF38BDF8).copy(alpha = settings.opacity)
+                            }
+                            val previewTextColor = when (settings.overlayStyle) {
+                                OverlayStyle.STANDARD -> Color(0xFFF8FAFC)
+                                OverlayStyle.CINEMA -> Color(0xFFCBD5E1).copy(alpha = (settings.opacity.coerceIn(0.45f, 1.0f) * 0.85f))
+                                OverlayStyle.TRANSPARENT -> Color(0xFFE2E8F0).copy(alpha = (settings.opacity.coerceIn(0.4f, 1.0f) * 0.92f))
+                            }
+                            val previewDotColor = if (settings.overlayStyle == OverlayStyle.STANDARD) {
+                                rowingColors.active
+                            } else {
+                                rowingColors.active.copy(alpha = (settings.opacity.coerceIn(0.35f, 1.0f) * 0.72f))
+                            }
+                            val previewShadow = when (settings.overlayStyle) {
+                                OverlayStyle.TRANSPARENT -> Shadow(
+                                    color = Color.Black.copy(alpha = 0.88f),
+                                    offset = Offset(0f, 1.5f),
+                                    blurRadius = 6f,
+                                )
+                                OverlayStyle.CINEMA -> Shadow(
+                                    color = Color.Black.copy(alpha = 0.55f),
+                                    offset = Offset(0f, 1f),
+                                    blurRadius = 3f,
+                                )
+                                OverlayStyle.STANDARD -> null
+                            }
+
                             Box(
                                 modifier = Modifier
                                     .horizontalScroll(rememberScrollState())
                                     .clip(RoundedCornerShape(16.dp))
-                                    .background(Color(0xFF0B121A).copy(alpha = settings.opacity))
-                                    .border(
-                                        1.dp,
-                                        Color(0xFF38BDF8).copy(alpha = settings.opacity),
-                                        RoundedCornerShape(16.dp),
-                                    )
+                                    .background(previewBg)
+                                    .border(1.dp, previewBorder, RoundedCornerShape(16.dp))
                                     .padding(horizontal = 14.dp, vertical = 10.dp),
                             ) {
                                 Row(
@@ -202,14 +244,22 @@ fun SettingsScreen(
                                         modifier = Modifier
                                             .size(9.dp)
                                             .clip(CircleShape)
-                                            .background(rowingColors.active),
+                                            .background(previewDotColor),
                                     )
-                                    val wattsPart = if (settings.showWattsInMini) "  •  185 W" else ""
+                                    val previewText = if (settings.compactOverlayMode) {
+                                        "2:04  •  1.420 m"
+                                    } else {
+                                        val wattsPart = if (settings.showWattsInMini) "  •  185 W" else ""
+                                        "2:04 /500m  •  26 spm  •  1.420 m  •  06:12$wattsPart"
+                                    }
                                     Text(
-                                        text = "2:04 /500m  •  26 spm  •  1.420 m  •  06:12$wattsPart",
-                                        color = Color(0xFFF8FAFC),
-                                        fontFamily = FontFamily.Monospace,
-                                        fontSize = (15f * settings.scale).sp,
+                                        text = previewText,
+                                        style = TextStyle(
+                                            color = previewTextColor,
+                                            fontFamily = FontFamily.Monospace,
+                                            fontSize = (15f * settings.scale).sp,
+                                            shadow = previewShadow,
+                                        ),
                                         maxLines = 1,
                                     )
                                 }
@@ -226,9 +276,40 @@ fun SettingsScreen(
                                     modifier = Modifier.size(16.dp),
                                 )
                                 Text(
-                                    text = "Vorschau über Video-App",
+                                    text = "Vorschau über Video-App (${settings.overlayStyle.label}" +
+                                        (if (settings.compactOverlayMode) " • Kompakt" else "") +
+                                        (if (settings.overlayPositionLocked) " • Gesperrt" else "") + ")",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = Color(0xFF94A3B8),
+                                )
+                            }
+                        }
+                    }
+
+                    // Overlay Style Chips (Standard / Kino / Transparent)
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(
+                            text = "Overlay-Stil",
+                            style = MaterialTheme.typography.titleMedium,
+                        )
+                        Text(
+                            text = when (settings.overlayStyle) {
+                                OverlayStyle.STANDARD -> "Dunkle Pille mit klarem Rahmen und kontrastreicher Schrift."
+                                OverlayStyle.CINEMA -> "Gedimmter Kino-Look – kaum ablenkend über dunklen Filmszenen."
+                                OverlayStyle.TRANSPARENT -> "Kein Kasten – schwebender Text mit Schatten wie ein Untertitel."
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colorScheme.onSurfaceVariant,
+                        )
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            OverlayStyle.entries.forEach { style ->
+                                FilterChip(
+                                    selected = settings.overlayStyle == style,
+                                    onClick = { onOverlayStyleChange(style) },
+                                    label = { Text(style.label) },
                                 )
                             }
                         }
@@ -253,7 +334,7 @@ fun SettingsScreen(
                         Slider(
                             value = settings.opacity,
                             onValueChange = onOpacityChange,
-                            valueRange = 0.35f..1.0f,
+                            valueRange = AppPreferences.MIN_OPACITY..1.0f,
                         )
                     }
 
@@ -283,10 +364,40 @@ fun SettingsScreen(
                     HorizontalDivider(color = colorScheme.outlineVariant.copy(alpha = 0.5f))
 
                     SettingToggleRow(
+                        title = "Ultra-Kompakt-Modus (Kino)",
+                        subtitle = "Zeigt nur Pace & Distanz/Rest – auch direkt im Overlay umschaltbar",
+                        checked = settings.compactOverlayMode,
+                        onCheckedChange = onCompactOverlayChange,
+                    )
+
+                    SettingToggleRow(
+                        title = "Overlay-Position sperren",
+                        subtitle = "Verhindert versehentliches Verschieben beim Bedienen von Video-Apps",
+                        checked = settings.overlayPositionLocked,
+                        onCheckedChange = onOverlayLockChange,
+                    )
+
+                    SettingToggleRow(
                         title = "Watt auch in der Mini-Leiste anzeigen",
-                        subtitle = "Sonst sichtbar durch Antippen des Overlays",
+                        subtitle = "Im Voll-Modus sichtbar, sonst beim Antippen des Overlays",
                         checked = settings.showWattsInMini,
                         onCheckedChange = onShowWattsInMiniChange,
+                    )
+
+                    HorizontalDivider(color = colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+                    SettingToggleRow(
+                        title = "Beim Start automatisch verbinden",
+                        subtitle = "Verbindet beim Öffnen direkt mit dem letzten bekannten S4 ComModule",
+                        checked = settings.autoReconnectOnStart,
+                        onCheckedChange = onAutoReconnectChange,
+                    )
+
+                    SettingToggleRow(
+                        title = "Overlay automatisch bei Verbindung",
+                        subtitle = "Blendet das Floating Overlay sofort ein, sobald der WaterRower verbunden ist",
+                        checked = settings.autoShowOverlayOnConnect,
+                        onCheckedChange = onAutoShowOverlayChange,
                     )
 
                     SettingToggleRow(
@@ -326,6 +437,34 @@ fun SettingsScreen(
                                     selected = settings.autoFinishIdleMinutes == mins,
                                     onClick = { onAutoFinishMinutesChange(mins) },
                                     label = { Text(if (mins == 0) "Aus" else "$mins Min") },
+                                )
+                            }
+                        }
+                    }
+
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            text = "Wochenziel (letzte 7 Tage)",
+                            style = MaterialTheme.typography.titleMedium,
+                        )
+                        Text(
+                            text = if (settings.weeklyGoalMeters == 0) {
+                                "Deaktiviert – optionaler Fortschrittsbalken in der Historie."
+                            } else {
+                                "Ziel: ${settings.weeklyGoalMeters / 1000} km pro Woche (sichtbar in der Historie)."
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colorScheme.onSurfaceVariant,
+                        )
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            WEEKLY_GOAL_OPTIONS.forEach { meters ->
+                                FilterChip(
+                                    selected = settings.weeklyGoalMeters == meters,
+                                    onClick = { onWeeklyGoalMetersChange(meters) },
+                                    label = { Text(if (meters == 0) "Aus" else "${meters / 1000} km") },
                                 )
                             }
                         }

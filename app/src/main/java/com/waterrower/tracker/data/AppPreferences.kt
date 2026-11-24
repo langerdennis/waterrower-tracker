@@ -5,13 +5,31 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
+enum class OverlayStyle(val id: String, val label: String) {
+    STANDARD("standard", "Standard"),
+    CINEMA("cinema", "Kino"),
+    TRANSPARENT("transparent", "Transparent"),
+    ;
+
+    companion object {
+        fun fromId(id: String?): OverlayStyle =
+            entries.firstOrNull { it.id == id } ?: STANDARD
+    }
+}
+
 data class OverlaySettings(
     val opacity: Float = 0.85f,
     val scale: Float = 1.0f,
+    val overlayStyle: OverlayStyle = OverlayStyle.STANDARD,
+    val compactOverlayMode: Boolean = false,
+    val overlayPositionLocked: Boolean = false,
     val showWattsInMini: Boolean = false,
     val autoStartRecording: Boolean = true,
     val autoFinishIdleMinutes: Int = AppPreferences.DEFAULT_AUTO_FINISH_MINUTES,
     val goalSoundEnabled: Boolean = true,
+    val autoReconnectOnStart: Boolean = true,
+    val autoShowOverlayOnConnect: Boolean = true,
+    val weeklyGoalMeters: Int = 0,
     val lastDeviceAddress: String? = null,
     val lastDeviceName: String? = null,
     val overlayX: Int = AppPreferences.DEFAULT_OVERLAY_X,
@@ -25,12 +43,18 @@ class AppPreferences(context: Context) {
     val settings: StateFlow<OverlaySettings> = _settings.asStateFlow()
 
     private fun load(): OverlaySettings = OverlaySettings(
-        opacity = prefs.getFloat(KEY_OPACITY, 0.85f).coerceIn(0.35f, 1.0f),
+        opacity = prefs.getFloat(KEY_OPACITY, 0.85f).coerceIn(MIN_OPACITY, 1.0f),
         scale = prefs.getFloat(KEY_SCALE, 1.0f).coerceIn(0.8f, 1.4f),
+        overlayStyle = OverlayStyle.fromId(prefs.getString(KEY_OVERLAY_STYLE, OverlayStyle.STANDARD.id)),
+        compactOverlayMode = prefs.getBoolean(KEY_COMPACT_OVERLAY, false),
+        overlayPositionLocked = prefs.getBoolean(KEY_OVERLAY_LOCKED, false),
         showWattsInMini = prefs.getBoolean(KEY_SHOW_WATTS, false),
         autoStartRecording = prefs.getBoolean(KEY_AUTO_RECORD, true),
         autoFinishIdleMinutes = prefs.getInt(KEY_AUTO_FINISH_MIN, DEFAULT_AUTO_FINISH_MINUTES).coerceIn(0, 30),
         goalSoundEnabled = prefs.getBoolean(KEY_GOAL_SOUND, true),
+        autoReconnectOnStart = prefs.getBoolean(KEY_AUTO_RECONNECT, true),
+        autoShowOverlayOnConnect = prefs.getBoolean(KEY_AUTO_SHOW_OVERLAY, true),
+        weeklyGoalMeters = prefs.getInt(KEY_WEEKLY_GOAL_METERS, 0).coerceIn(0, 200_000),
         lastDeviceAddress = prefs.getString(KEY_LAST_ADDR, null),
         lastDeviceName = prefs.getString(KEY_LAST_NAME, null),
         overlayX = prefs.getInt(KEY_OVERLAY_X, DEFAULT_OVERLAY_X),
@@ -38,7 +62,7 @@ class AppPreferences(context: Context) {
     )
 
     fun setOpacity(opacity: Float) {
-        val clamped = opacity.coerceIn(0.35f, 1.0f)
+        val clamped = opacity.coerceIn(MIN_OPACITY, 1.0f)
         prefs.edit().putFloat(KEY_OPACITY, clamped).apply()
         _settings.value = _settings.value.copy(opacity = clamped)
     }
@@ -47,6 +71,21 @@ class AppPreferences(context: Context) {
         val clamped = scale.coerceIn(0.8f, 1.4f)
         prefs.edit().putFloat(KEY_SCALE, clamped).apply()
         _settings.value = _settings.value.copy(scale = clamped)
+    }
+
+    fun setOverlayStyle(style: OverlayStyle) {
+        prefs.edit().putString(KEY_OVERLAY_STYLE, style.id).apply()
+        _settings.value = _settings.value.copy(overlayStyle = style)
+    }
+
+    fun setCompactOverlayMode(compact: Boolean) {
+        prefs.edit().putBoolean(KEY_COMPACT_OVERLAY, compact).apply()
+        _settings.value = _settings.value.copy(compactOverlayMode = compact)
+    }
+
+    fun setOverlayPositionLocked(locked: Boolean) {
+        prefs.edit().putBoolean(KEY_OVERLAY_LOCKED, locked).apply()
+        _settings.value = _settings.value.copy(overlayPositionLocked = locked)
     }
 
     fun setShowWattsInMini(show: Boolean) {
@@ -68,6 +107,22 @@ class AppPreferences(context: Context) {
     fun setGoalSoundEnabled(enabled: Boolean) {
         prefs.edit().putBoolean(KEY_GOAL_SOUND, enabled).apply()
         _settings.value = _settings.value.copy(goalSoundEnabled = enabled)
+    }
+
+    fun setAutoReconnectOnStart(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_AUTO_RECONNECT, enabled).apply()
+        _settings.value = _settings.value.copy(autoReconnectOnStart = enabled)
+    }
+
+    fun setAutoShowOverlayOnConnect(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_AUTO_SHOW_OVERLAY, enabled).apply()
+        _settings.value = _settings.value.copy(autoShowOverlayOnConnect = enabled)
+    }
+
+    fun setWeeklyGoalMeters(meters: Int) {
+        val clamped = meters.coerceIn(0, 200_000)
+        prefs.edit().putInt(KEY_WEEKLY_GOAL_METERS, clamped).apply()
+        _settings.value = _settings.value.copy(weeklyGoalMeters = clamped)
     }
 
     fun saveLastDevice(address: String, name: String) {
@@ -97,13 +152,20 @@ class AppPreferences(context: Context) {
         const val DEFAULT_OVERLAY_X = 36
         const val DEFAULT_OVERLAY_Y = 36
         const val DEFAULT_AUTO_FINISH_MINUTES = 3
+        const val MIN_OPACITY = 0.15f
 
         private const val KEY_OPACITY = "overlay_opacity"
         private const val KEY_SCALE = "overlay_scale"
+        private const val KEY_OVERLAY_STYLE = "overlay_style"
+        private const val KEY_COMPACT_OVERLAY = "overlay_compact_mode"
+        private const val KEY_OVERLAY_LOCKED = "overlay_position_locked"
         private const val KEY_SHOW_WATTS = "overlay_show_watts"
         private const val KEY_AUTO_RECORD = "auto_start_recording"
         private const val KEY_AUTO_FINISH_MIN = "auto_finish_idle_minutes"
         private const val KEY_GOAL_SOUND = "goal_sound_enabled"
+        private const val KEY_AUTO_RECONNECT = "auto_reconnect_on_start"
+        private const val KEY_AUTO_SHOW_OVERLAY = "auto_show_overlay_on_connect"
+        private const val KEY_WEEKLY_GOAL_METERS = "weekly_goal_meters"
         private const val KEY_LAST_ADDR = "last_device_address"
         private const val KEY_LAST_NAME = "last_device_name"
         private const val KEY_OVERLAY_X = "overlay_x"

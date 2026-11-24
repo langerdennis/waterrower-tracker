@@ -98,6 +98,7 @@ class MainActivity : ComponentActivity() {
     private val app get() = application as WaterRowerApp
     private var pendingAfterPermissions: (() -> Unit)? = null
     private var hasRequestedNotificationPermission = false
+    private var hasAttemptedAutoReconnect = false
     private var permissionDialogState by mutableStateOf<BlePermissionDialogState?>(null)
     private var isBackupBusy by mutableStateOf(false)
     private var updateState by mutableStateOf<UpdateUiState>(UpdateUiState.Idle)
@@ -160,6 +161,13 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         hasRequestedNotificationPermission =
             savedInstanceState?.getBoolean(KEY_REQUESTED_NOTIFICATION_PERMISSION, false) ?: false
+        hasAttemptedAutoReconnect =
+            savedInstanceState?.getBoolean(KEY_AUTO_RECONNECT_ATTEMPTED, false) ?: false
+
+        if (!hasAttemptedAutoReconnect) {
+            hasAttemptedAutoReconnect = true
+            maybeAutoReconnectOnStart()
+        }
 
         setContent {
             val darkTheme = isSystemInDarkTheme()
@@ -225,6 +233,25 @@ class MainActivity : ComponentActivity() {
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         outState.putBoolean(KEY_REQUESTED_NOTIFICATION_PERMISSION, hasRequestedNotificationPermission)
+        outState.putBoolean(KEY_AUTO_RECONNECT_ATTEMPTED, hasAttemptedAutoReconnect)
+    }
+
+    private fun maybeAutoReconnectOnStart() {
+        val settings = app.preferences.settings.value
+        val hub = app.sessionHub
+        val address = settings.lastDeviceAddress
+        val name = settings.lastDeviceName
+        if (!settings.autoReconnectOnStart ||
+            hub.isSimulatorMode.value ||
+            hub.connectionState.value !is com.waterrower.tracker.model.ConnectionState.Disconnected ||
+            address.isNullOrBlank() ||
+            name.isNullOrBlank() ||
+            !hasCoreBlePermissions()
+        ) {
+            return
+        }
+        RowingForegroundService.startService(this)
+        hub.connect(address, name)
     }
 
     private fun handleLaunchBackupExport() {
@@ -490,6 +517,7 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         private const val KEY_REQUESTED_NOTIFICATION_PERMISSION = "requested_notification_permission"
+        private const val KEY_AUTO_RECONNECT_ATTEMPTED = "auto_reconnect_attempted"
     }
 }
 
@@ -899,6 +927,7 @@ private fun TabContent(
             } else {
                 HistoryScreen(
                     workouts = workouts,
+                    weeklyGoalMeters = settings.weeklyGoalMeters,
                     onSelectWorkout = onSelectWorkout,
                     onOpenSettings = onOpenSettings,
                 )
@@ -915,10 +944,16 @@ private fun TabContent(
             updateState = updateState,
             onOpacityChange = { prefs.setOpacity(it) },
             onScaleChange = { prefs.setScale(it) },
+            onOverlayStyleChange = { prefs.setOverlayStyle(it) },
+            onCompactOverlayChange = { prefs.setCompactOverlayMode(it) },
+            onOverlayLockChange = { prefs.setOverlayPositionLocked(it) },
             onShowWattsInMiniChange = { prefs.setShowWattsInMini(it) },
             onAutoStartChange = { prefs.setAutoStartRecording(it) },
             onAutoFinishMinutesChange = { prefs.setAutoFinishIdleMinutes(it) },
             onGoalSoundChange = { prefs.setGoalSoundEnabled(it) },
+            onAutoReconnectChange = { prefs.setAutoReconnectOnStart(it) },
+            onAutoShowOverlayChange = { prefs.setAutoShowOverlayOnConnect(it) },
+            onWeeklyGoalMetersChange = { prefs.setWeeklyGoalMeters(it) },
             onResetOverlayPosition = onResetOverlayPosition,
             onExportBackup = onExportBackup,
             onImportBackup = onImportBackup,

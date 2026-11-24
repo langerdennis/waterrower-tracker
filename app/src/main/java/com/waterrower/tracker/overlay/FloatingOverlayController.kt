@@ -22,6 +22,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import com.waterrower.tracker.data.AppPreferences
 import com.waterrower.tracker.data.OverlaySettings
+import com.waterrower.tracker.data.OverlayStyle
 import com.waterrower.tracker.data.RecordingState
 import com.waterrower.tracker.model.ConnectionState
 import com.waterrower.tracker.model.GhostDelta
@@ -39,10 +40,11 @@ import kotlin.math.roundToInt
  * fullscreen video and streaming apps on Android tablets and phones.
  *
  * - Touch events outside the pill pass straight through to the underlying app.
- * - Drag anywhere on screen (clamped to screen & display cutout bounds, position persisted).
- * - Tap to toggle between compact Mini-Pill and Expanded Controls (Pause/Weiter + Stop & Save).
- * - Optional slim progress bar, peripheral target-pace border tint, live ghost delta,
- *   and compact interval / hybrid Row+KB/Mat step prompts.
+ * - Drag anywhere on screen (clamped to screen & display cutout bounds, position persisted)
+ *   unless locked via [OverlaySettings.overlayPositionLocked].
+ * - Supports 3 visual styles (Standard, Cinema, Transparent) plus an Ultra-Compact display mode.
+ * - Tap to toggle between compact Mini-Pill and Expanded Controls (Pause/Weiter, Stop & Save,
+ *   quick Compact/Full & Lock/Free toggles).
  */
 class FloatingOverlayController(
     private val context: Context,
@@ -68,15 +70,21 @@ class FloatingOverlayController(
     private var nextStepButton: TextView? = null
     private var pauseButton: TextView? = null
     private var recordButton: TextView? = null
+    private var compactToggleButton: TextView? = null
+    private var lockToggleButton: TextView? = null
 
     private var pillDrawable: GradientDrawable? = null
     private var dotDrawable: GradientDrawable? = null
     private var progressFillDrawable: GradientDrawable? = null
     private var pauseBtnDrawable: GradientDrawable? = null
     private var recordBtnDrawable: GradientDrawable? = null
+    private var compactBtnDrawable: GradientDrawable? = null
+    private var lockBtnDrawable: GradientDrawable? = null
 
     private var appliedOpacity: Float = Float.NaN
     private var appliedBorderColor: Int = 0
+    private var appliedStyle: OverlayStyle? = null
+    private var appliedExpandedForBg: Boolean? = null
     private var appliedScale: Float = Float.NaN
     private var appliedDotColor: Int = 0
     private var appliedProgressVisible: Boolean? = null
@@ -90,6 +98,8 @@ class FloatingOverlayController(
     private var lastPauseColor: Int = 0
     private var lastRecordText: String? = null
     private var lastRecordColor: Int = 0
+    private var lastCompactMode: Boolean? = null
+    private var lastLockedMode: Boolean? = null
     private var lastAppliedSettingsX: Int = Int.MIN_VALUE
     private var lastAppliedSettingsY: Int = Int.MIN_VALUE
 
@@ -113,18 +123,20 @@ class FloatingOverlayController(
         lastSettings = settings
         resetRenderCache()
 
-        val pillBg = createPillBackground(settings.opacity, COLOR_CONNECTED_SKY)
+        val pillBg = createPillBackground(settings.opacity, COLOR_CONNECTED_SKY, settings.overlayStyle, false)
         val dotBg = createDotBackground(COLOR_DISCONNECTED)
         val fillBg = createProgressBarDrawable(COLOR_CONNECTED_SKY)
         val trackBg = createProgressBarDrawable(Color.argb(70, 148, 163, 184))
         val pauseBg = createChipDrawable(COLOR_AMBER)
         val recordBg = createChipDrawable(COLOR_SKY)
+        val compactBg = createChipDrawable(COLOR_SLATE_CHIP)
+        val lockBg = createChipDrawable(COLOR_SLATE_CHIP)
 
         val container = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(14), dp(9), dp(14), dp(9))
             background = pillBg
-            elevation = dp(8).toFloat()
+            elevation = if (settings.overlayStyle == OverlayStyle.STANDARD) dp(8).toFloat() else 0f
         }
 
         // Top compact row (always visible)
@@ -222,8 +234,24 @@ class FloatingOverlayController(
         actionRow.addView(appBtn)
         actionRow.addView(closeBtn)
 
+        // Quick-toggle row for Cinema Compact mode & Position Lock (usable mid-episode)
+        val quickToggleRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(6), 0, 0)
+        }
+        val compactBtn = createActionChip("Kompakt", compactBg) {
+            preferences.setCompactOverlayMode(!lastSettings.compactOverlayMode)
+        }
+        val lockBtn = createActionChip("Pos: Frei", lockBg) {
+            preferences.setOverlayPositionLocked(!lastSettings.overlayPositionLocked)
+        }
+        quickToggleRow.addView(compactBtn)
+        quickToggleRow.addView(lockBtn)
+
         expanded.addView(extraMetrics)
         expanded.addView(actionRow)
+        expanded.addView(quickToggleRow)
         container.addView(expanded)
 
         // Pre-measure so initial position is clamped accurately before addView()
@@ -278,26 +306,28 @@ class FloatingOverlayController(
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    val dx = (event.rawX - initialTouchX).roundToInt()
-                    val dy = (event.rawY - initialTouchY).roundToInt()
-                    if (abs(dx) > dp(5) || abs(dy) > dp(5)) {
-                        moved = true
-                    }
-                    if (moved) {
-                        val (nx, ny) = clampPosition(initialX + dx, initialY + dy, view)
-                        if (nx != params.x || ny != params.y) {
-                            params.x = nx
-                            params.y = ny
-                            try {
-                                windowManager.updateViewLayout(container, params)
-                            } catch (_: Exception) {
+                    if (!lastSettings.overlayPositionLocked) {
+                        val dx = (event.rawX - initialTouchX).roundToInt()
+                        val dy = (event.rawY - initialTouchY).roundToInt()
+                        if (abs(dx) > dp(5) || abs(dy) > dp(5)) {
+                            moved = true
+                        }
+                        if (moved) {
+                            val (nx, ny) = clampPosition(initialX + dx, initialY + dy, view)
+                            if (nx != params.x || ny != params.y) {
+                                params.x = nx
+                                params.y = ny
+                                try {
+                                    windowManager.updateViewLayout(container, params)
+                                } catch (_: Exception) {
+                                }
                             }
                         }
                     }
                     true
                 }
                 MotionEvent.ACTION_UP -> {
-                    if (moved) {
+                    if (moved && !lastSettings.overlayPositionLocked) {
                         lastAppliedSettingsX = params.x
                         lastAppliedSettingsY = params.y
                         preferences.saveOverlayPosition(params.x, params.y)
@@ -326,15 +356,15 @@ class FloatingOverlayController(
             nextStepButton = nextBtn
             pauseButton = pauseBtn
             recordButton = recBtn
+            compactToggleButton = compactBtn
+            lockToggleButton = lockBtn
             pillDrawable = pillBg
             dotDrawable = dotBg
             progressFillDrawable = fillBg
             pauseBtnDrawable = pauseBg
             recordBtnDrawable = recordBg
-            appliedOpacity = settings.opacity
-            appliedBorderColor = COLOR_CONNECTED_SKY
-            appliedScale = settings.scale
-            appliedDotColor = COLOR_DISCONNECTED
+            compactBtnDrawable = compactBg
+            lockBtnDrawable = lockBg
             lastAppliedSettingsX = settings.overlayX
             lastAppliedSettingsY = settings.overlayY
             render()
@@ -362,11 +392,15 @@ class FloatingOverlayController(
         nextStepButton = null
         pauseButton = null
         recordButton = null
+        compactToggleButton = null
+        lockToggleButton = null
         pillDrawable = null
         dotDrawable = null
         progressFillDrawable = null
         pauseBtnDrawable = null
         recordBtnDrawable = null
+        compactBtnDrawable = null
+        lockBtnDrawable = null
         isExpanded = false
         resetRenderCache()
     }
@@ -453,6 +487,7 @@ class FloatingOverlayController(
             RecordingState.Idle -> lastTelemetry.distanceMeters
         }
 
+        val style = lastSettings.overlayStyle
         val program = lastProgram
         val paceZone = lastGoal.evaluatePaceZone(lastTelemetry.paceSecondsPer500m)
         val borderBaseColor = when {
@@ -466,10 +501,22 @@ class FloatingOverlayController(
             else -> COLOR_CONNECTED_SKY
         }
 
-        if (lastSettings.opacity != appliedOpacity || borderBaseColor != appliedBorderColor) {
-            updatePillDrawable(pillDrawable, lastSettings.opacity, borderBaseColor)
+        if (lastSettings.opacity != appliedOpacity ||
+            borderBaseColor != appliedBorderColor ||
+            style != appliedStyle ||
+            isExpanded != appliedExpandedForBg
+        ) {
+            updatePillDrawable(pillDrawable, lastSettings.opacity, borderBaseColor, style, isExpanded)
+            applyTextStyle(style, lastSettings.opacity)
+            root.elevation = when {
+                style == OverlayStyle.TRANSPARENT && !isExpanded -> 0f
+                style == OverlayStyle.CINEMA -> dp(2).toFloat()
+                else -> dp(8).toFloat()
+            }
             appliedOpacity = lastSettings.opacity
             appliedBorderColor = borderBaseColor
+            appliedStyle = style
+            appliedExpandedForBg = isExpanded
         }
 
         if (lastSettings.scale != appliedScale) {
@@ -478,7 +525,7 @@ class FloatingOverlayController(
             appliedScale = lastSettings.scale
         }
 
-        val dotColor = when {
+        val rawDotColor = when {
             program?.currentStep is ProgramStep.OffRowerStation && !program.isCompleted -> COLOR_VIOLET
             program?.currentStep is ProgramStep.TimedRest && !program.isCompleted -> COLOR_AMBER
             rec is RecordingState.Active && !rec.isPaused -> COLOR_ACTIVE_GREEN
@@ -486,6 +533,12 @@ class FloatingOverlayController(
             lastConnection is ConnectionState.Connected -> COLOR_CONNECTED_SKY
             lastConnection is ConnectionState.Connecting -> COLOR_AMBER
             else -> COLOR_DISCONNECTED
+        }
+        val dotColor = if (style == OverlayStyle.STANDARD) {
+            rawDotColor
+        } else {
+            val dotAlpha = (lastSettings.opacity.coerceIn(0.35f, 1.0f) * 185f).roundToInt().coerceIn(70, 210)
+            Color.argb(dotAlpha, Color.red(rawDotColor), Color.green(rawDotColor), Color.blue(rawDotColor))
         }
         if (dotColor != appliedDotColor) {
             dotDrawable?.setColor(dotColor)
@@ -501,36 +554,67 @@ class FloatingOverlayController(
             ""
         }
 
-        val baseMini = when {
-            program != null && program.isCompleted ->
-                "✓ ${program.plan.titleWithScale}  •  $distToShow  •  $elapsedToShow"
-            program != null && program.currentStep is ProgramStep.TimedRest -> {
-                val step = program.currentStep
-                "Pause ${RowingTelemetry.formatDuration(program.restRemainingSeconds)}  •  danach ${step.nextDescription}"
+        val baseMini = if (lastSettings.compactOverlayMode) {
+            when {
+                program != null && program.isCompleted ->
+                    "✓ ${program.plan.preset.title}  •  $distToShow"
+                program != null && program.currentStep is ProgramStep.TimedRest ->
+                    "Pause ${RowingTelemetry.formatDuration(program.restRemainingSeconds)}"
+                program != null && program.currentStep is ProgramStep.OffRowerStation -> {
+                    val step = program.currentStep
+                    "R${step.roundIndex}/${step.totalRounds}: ${step.exerciseLabel}"
+                }
+                program != null && program.currentStep is ProgramStep.RowingDistance -> {
+                    val step = program.currentStep
+                    val remM = (step.targetMeters - program.stepDistanceMeters).coerceAtLeast(0)
+                    "${lastTelemetry.formattedPace}  •  noch ${RowingTelemetry.formatDistance(remM)}"
+                }
+                else -> {
+                    val rem = lastGoal.remainingSummary(distMeters, elapsedSec)
+                    if (rem != null) {
+                        "${lastTelemetry.formattedPace}  •  $rem"
+                    } else {
+                        "${lastTelemetry.formattedPace}  •  $distToShow"
+                    }
+                }
             }
-            program != null && program.currentStep is ProgramStep.OffRowerStation -> {
-                val step = program.currentStep
-                val nextHint = step.nextRoundLabel?.let { "Ziehen für $it" } ?: "Fertig → Stop & Save"
-                "R${step.roundIndex}/${step.totalRounds}: ${step.exerciseLabel}  •  $nextHint"
+        } else {
+            when {
+                program != null && program.isCompleted ->
+                    "✓ ${program.plan.titleWithScale}  •  $distToShow  •  $elapsedToShow"
+                program != null && program.currentStep is ProgramStep.TimedRest -> {
+                    val step = program.currentStep
+                    "Pause ${RowingTelemetry.formatDuration(program.restRemainingSeconds)}  •  danach ${step.nextDescription}"
+                }
+                program != null && program.currentStep is ProgramStep.OffRowerStation -> {
+                    val step = program.currentStep
+                    val nextHint = step.nextRoundLabel?.let { "Ziehen für $it" } ?: "Fertig → Stop & Save"
+                    "R${step.roundIndex}/${step.totalRounds}: ${step.exerciseLabel}  •  $nextHint"
+                }
+                program != null && program.currentStep is ProgramStep.RowingDistance -> {
+                    val step = program.currentStep
+                    val remM = (step.targetMeters - program.stepDistanceMeters).coerceAtLeast(0)
+                    "R${step.roundIndex}/${step.totalRounds}  •  ${lastTelemetry.formattedPace} /500m  •  $spmText spm  •  noch ${RowingTelemetry.formatDistance(remM)}  •  $elapsedToShow$wattsSuffix"
+                }
+                else ->
+                    "${lastTelemetry.formattedPace} /500m  •  $spmText spm  •  $distToShow  •  $elapsedToShow$wattsSuffix"
             }
-            program != null && program.currentStep is ProgramStep.RowingDistance -> {
-                val step = program.currentStep
-                val remM = (step.targetMeters - program.stepDistanceMeters).coerceAtLeast(0)
-                "R${step.roundIndex}/${step.totalRounds}  •  ${lastTelemetry.formattedPace} /500m  •  $spmText spm  •  noch ${RowingTelemetry.formatDistance(remM)}  •  $elapsedToShow$wattsSuffix"
-            }
-            else ->
-                "${lastTelemetry.formattedPace} /500m  •  $spmText spm  •  $distToShow  •  $elapsedToShow$wattsSuffix"
         }
 
         val showGhostInMini = lastGhostDelta != null &&
             (program == null || program.isCompleted || program.currentStep is ProgramStep.RowingDistance)
         val ghost = if (showGhostInMini) lastGhostDelta else null
         val ghostSuffix = ghost?.let { "  •  ${it.formattedCompact}" } ?: ""
-        val ghostColor = when {
+        val rawGhostColor = when {
             ghost == null -> 0
             ghost.deltaMeters > 0 -> COLOR_ACTIVE_GREEN
             ghost.deltaMeters < 0 -> COLOR_AMBER
             else -> COLOR_CONNECTED_SKY
+        }
+        val ghostColor = if (ghost == null || style == OverlayStyle.STANDARD) {
+            rawGhostColor
+        } else {
+            Color.argb(200, Color.red(rawGhostColor), Color.green(rawGhostColor), Color.blue(rawGhostColor))
         }
         val miniKey = "$baseMini|$ghostSuffix|$ghostColor"
         if (miniKey != lastMiniKey) {
@@ -575,11 +659,16 @@ class FloatingOverlayController(
                 }
                 appliedProgressPermille = permille
             }
-            val barColor = when {
+            val rawBarColor = when {
                 permille >= 1000 -> COLOR_ACTIVE_GREEN
                 program?.currentStep is ProgramStep.OffRowerStation -> COLOR_VIOLET
                 program?.currentStep is ProgramStep.TimedRest -> COLOR_AMBER
                 else -> COLOR_CONNECTED_SKY
+            }
+            val barColor = if (style == OverlayStyle.STANDARD) {
+                rawBarColor
+            } else {
+                Color.argb(170, Color.red(rawBarColor), Color.green(rawBarColor), Color.blue(rawBarColor))
             }
             if (barColor != appliedProgressColor) {
                 progressFillDrawable?.setColor(barColor)
@@ -591,6 +680,21 @@ class FloatingOverlayController(
         if (lastNextStepVisible != showNextStepBtn) {
             nextStepButton?.visibility = if (showNextStepBtn) View.VISIBLE else View.GONE
             lastNextStepVisible = showNextStepBtn
+        }
+
+        if (lastCompactMode != lastSettings.compactOverlayMode) {
+            compactToggleButton?.text = if (lastSettings.compactOverlayMode) "Voll" else "Kompakt"
+            compactBtnDrawable?.setColor(
+                if (lastSettings.compactOverlayMode) COLOR_SKY else COLOR_SLATE_CHIP,
+            )
+            lastCompactMode = lastSettings.compactOverlayMode
+        }
+        if (lastLockedMode != lastSettings.overlayPositionLocked) {
+            lockToggleButton?.text = if (lastSettings.overlayPositionLocked) "Gesperrt" else "Pos: Frei"
+            lockBtnDrawable?.setColor(
+                if (lastSettings.overlayPositionLocked) COLOR_AMBER else COLOR_SLATE_CHIP,
+            )
+            lastLockedMode = lastSettings.overlayPositionLocked
         }
 
         if (isExpanded) {
@@ -662,6 +766,26 @@ class FloatingOverlayController(
         }
     }
 
+    private fun applyTextStyle(style: OverlayStyle, opacity: Float) {
+        val textView = miniLineView ?: return
+        when (style) {
+            OverlayStyle.STANDARD -> {
+                textView.setTextColor(Color.parseColor("#F8FAFC"))
+                textView.setShadowLayer(0f, 0f, 0f, Color.TRANSPARENT)
+            }
+            OverlayStyle.CINEMA -> {
+                val textAlpha = (opacity.coerceIn(0.45f, 1.0f) * 215f).roundToInt().coerceIn(115, 220)
+                textView.setTextColor(Color.argb(textAlpha, 203, 213, 225))
+                textView.setShadowLayer(2f, 0f, 1f, Color.argb(140, 0, 0, 0))
+            }
+            OverlayStyle.TRANSPARENT -> {
+                val textAlpha = (opacity.coerceIn(0.4f, 1.0f) * 235f).roundToInt().coerceIn(120, 238)
+                textView.setTextColor(Color.argb(textAlpha, 226, 232, 240))
+                textView.setShadowLayer(5f, 0f, 1.5f, Color.argb(225, 0, 0, 0))
+            }
+        }
+    }
+
     private fun clampPosition(rawX: Int, rawY: Int, view: View): Pair<Int, Int> {
         val viewW = if (view.width > 0) view.width else view.measuredWidth
         val viewH = if (view.height > 0) view.height else view.measuredHeight
@@ -712,6 +836,8 @@ class FloatingOverlayController(
     private fun resetRenderCache() {
         appliedOpacity = Float.NaN
         appliedBorderColor = 0
+        appliedStyle = null
+        appliedExpandedForBg = null
         appliedScale = Float.NaN
         appliedDotColor = 0
         appliedProgressVisible = null
@@ -725,6 +851,8 @@ class FloatingOverlayController(
         lastPauseColor = 0
         lastRecordText = null
         lastRecordColor = 0
+        lastCompactMode = null
+        lastLockedMode = null
         lastAppliedSettingsX = Int.MIN_VALUE
         lastAppliedSettingsY = Int.MIN_VALUE
     }
@@ -764,26 +892,64 @@ class FloatingOverlayController(
             setColor(color)
         }
 
-    private fun createPillBackground(opacity: Float, borderBaseColor: Int): GradientDrawable =
+    private fun createPillBackground(
+        opacity: Float,
+        borderBaseColor: Int,
+        style: OverlayStyle,
+        expanded: Boolean,
+    ): GradientDrawable =
         GradientDrawable().apply {
             shape = GradientDrawable.RECTANGLE
             cornerRadius = dp(18).toFloat()
-            updatePillDrawable(this, opacity, borderBaseColor)
+            updatePillDrawable(this, opacity, borderBaseColor, style, expanded)
         }
 
-    private fun updatePillDrawable(drawable: GradientDrawable?, opacity: Float, borderBaseColor: Int) {
+    private fun updatePillDrawable(
+        drawable: GradientDrawable?,
+        opacity: Float,
+        borderBaseColor: Int,
+        style: OverlayStyle,
+        expanded: Boolean,
+    ) {
         if (drawable == null) return
-        val alphaInt = (opacity.coerceIn(0.35f, 1.0f) * 255).roundToInt()
-        val bgColor = Color.argb(alphaInt, 11, 18, 26)
-        val borderAlpha = (alphaInt * 0.9f).roundToInt().coerceAtMost(255)
-        val borderColor = Color.argb(
-            borderAlpha,
-            Color.red(borderBaseColor),
-            Color.green(borderBaseColor),
-            Color.blue(borderBaseColor),
-        )
-        drawable.setColor(bgColor)
-        drawable.setStroke(dp(1), borderColor)
+        val clamped = opacity.coerceIn(AppPreferences.MIN_OPACITY, 1.0f)
+        when {
+            style == OverlayStyle.TRANSPARENT && !expanded -> {
+                drawable.setColor(Color.TRANSPARENT)
+                drawable.setStroke(0, Color.TRANSPARENT)
+            }
+            style == OverlayStyle.TRANSPARENT && expanded -> {
+                drawable.setColor(Color.argb(190, 8, 12, 18))
+                drawable.setStroke(dp(1), Color.argb(90, 148, 163, 184))
+            }
+            style == OverlayStyle.CINEMA -> {
+                val bgAlpha = (clamped * 0.72f * 255f).roundToInt().coerceIn(28, 200)
+                val borderAlpha = (clamped * 0.35f * 255f).roundToInt().coerceIn(18, 95)
+                drawable.setColor(Color.argb(bgAlpha, 5, 7, 10))
+                drawable.setStroke(
+                    dp(1),
+                    Color.argb(
+                        borderAlpha,
+                        Color.red(borderBaseColor),
+                        Color.green(borderBaseColor),
+                        Color.blue(borderBaseColor),
+                    ),
+                )
+            }
+            else -> {
+                val alphaInt = (clamped * 255f).roundToInt()
+                val bgColor = Color.argb(alphaInt, 11, 18, 26)
+                val borderAlpha = (alphaInt * 0.9f).roundToInt().coerceAtMost(255)
+                val borderColor = Color.argb(
+                    borderAlpha,
+                    Color.red(borderBaseColor),
+                    Color.green(borderBaseColor),
+                    Color.blue(borderBaseColor),
+                )
+                drawable.setColor(bgColor)
+                drawable.setStroke(dp(1), borderColor)
+            }
+        }
     }
 
     private fun createDotBackground(color: Int): GradientDrawable =

@@ -15,6 +15,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.provider.Settings
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -47,6 +48,7 @@ class RowingForegroundService : LifecycleService() {
     private var idleStopJob: Job? = null
     private var lastStartId: Int = -1
     private var completedGoalKey: String? = null
+    private var wasConnectedForAutoOverlay: Boolean = false
 
     private var lastNotificationText: String? = null
     private var lastNotificationStateKey: String? = null
@@ -113,6 +115,20 @@ class RowingForegroundService : LifecycleService() {
                     program = extras.second.third,
                 )
             }.collect { snap ->
+                val isConnected = snap.connection is ConnectionState.Connected
+                if (isConnected && !wasConnectedForAutoOverlay) {
+                    wasConnectedForAutoOverlay = true
+                    if (snap.settings.autoShowOverlayOnConnect &&
+                        !snap.overlayVisible &&
+                        overlayController?.isShowing != true &&
+                        Settings.canDrawOverlays(this@RowingForegroundService)
+                    ) {
+                        showOverlay()
+                    }
+                } else if (!isConnected) {
+                    wasConnectedForAutoOverlay = false
+                }
+
                 runOnMain {
                     overlayController?.update(
                         telemetry = snap.telemetry,
