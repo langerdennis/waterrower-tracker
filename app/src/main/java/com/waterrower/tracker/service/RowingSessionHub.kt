@@ -13,8 +13,12 @@ import com.waterrower.tracker.data.WorkoutRecorder
 import com.waterrower.tracker.data.WorkoutSampleEntity
 import com.waterrower.tracker.model.BleDiagnostics
 import com.waterrower.tracker.model.ConnectionState
+import com.waterrower.tracker.model.GhostDelta
+import com.waterrower.tracker.model.GhostRacer
+import com.waterrower.tracker.model.GhostReference
 import com.waterrower.tracker.model.RowingTelemetry
 import com.waterrower.tracker.model.ScannedDevice
+import com.waterrower.tracker.model.WorkoutGoal
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -28,10 +32,14 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 data class BackupImportSummary(
     val importedCount: Int,
@@ -83,6 +91,33 @@ class RowingSessionHub(
 
     private val _recordingState = MutableStateFlow<RecordingState>(RecordingState.Idle)
     val recordingState: StateFlow<RecordingState> = _recordingState.asStateFlow()
+
+    private val _activeGoal = MutableStateFlow(WorkoutGoal())
+    val activeGoal: StateFlow<WorkoutGoal> = _activeGoal.asStateFlow()
+
+    private val _ghostReference = MutableStateFlow<GhostReference?>(null)
+    val ghostReference: StateFlow<GhostReference?> = _ghostReference.asStateFlow()
+
+    val ghostDelta: StateFlow<GhostDelta?> = combine(
+        ghostReference,
+        recordingState,
+        telemetry,
+    ) { ghost, rec, frame ->
+        if (ghost == null) return@combine null
+        val elapsed = when (rec) {
+            is RecordingState.Active -> rec.elapsedSeconds
+            RecordingState.Idle -> frame.elapsedSeconds
+        }
+        val dist = when (rec) {
+            is RecordingState.Active -> rec.distanceMeters
+            RecordingState.Idle -> frame.distanceMeters
+        }
+        if (elapsed <= 0 && dist <= 0 && rec is RecordingState.Idle) {
+            null
+        } else {
+            GhostRacer.evaluate(ghost, elapsedSeconds = elapsed, currentDistanceMeters = dist)
+        }
+    }.stateIn(scope, SharingStarted.Eagerly, null)
 
     private val _isOverlayVisible = MutableStateFlow(false)
     val isOverlayVisible: StateFlow<Boolean> = _isOverlayVisible.asStateFlow()
@@ -252,6 +287,43 @@ class RowingSessionHub(
 
     fun setOverlayVisible(visible: Boolean) {
         _isOverlayVisible.value = visible
+    }
+
+    fun setWorkoutGoal(goal: WorkoutGoal) {
+        _activeGoal.value = goal
+    }
+
+    fun clearWorkoutGoal() {
+        _activeGoal.value = WorkoutGoal()
+    }
+
+    fun selectGhostWorkout(workoutId: String?) {
+        if (workoutId == null) {
+            _ghostReference.value = null
+            return
+        }
+        scope.launch {
+            val workout = database.workoutDao().getWorkoutById(workoutId)
+            if (workout == null) {
+                emitUiMessage("Referenz-Workout für Ghost nicht gefunden.")
+                return@launch
+            }
+            val samples = database.workoutDao().getSamplesForWorkout(workoutId)
+            val dateLabel = SimpleDateFormat("dd.MM.", Locale.GERMANY)
+                .format(Date(workout.startedAtEpochMs))
+            val label = "$dateLabel • ${RowingTelemetry.formatDistance(workout.totalDistanceMeters)} (${RowingTelemetry.formatPace(workout.avgPaceSecPer500m)})"
+            val ref = GhostRacer.fromWorkout(workout, samples, label)
+            if (ref.points.size < 2) {
+                emitUiMessage("Dieses Workout hat zu wenig Verlaufsdaten für den Ghost-Racer.")
+                return@launch
+            }
+            _ghostReference.value = ref
+            emitUiMessage("Ghost-Racer aktiv: $label")
+        }
+    }
+
+    fun clearGhost() {
+        _ghostReference.value = null
     }
 
     suspend fun getWorkout(workoutId: String): WorkoutEntity? =

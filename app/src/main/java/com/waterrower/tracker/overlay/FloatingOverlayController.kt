@@ -8,6 +8,9 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.provider.Settings
+import android.text.SpannableStringBuilder
+import android.text.Spanned
+import android.text.style.ForegroundColorSpan
 import android.util.DisplayMetrics
 import android.util.TypedValue
 import android.view.Gravity
@@ -21,7 +24,10 @@ import com.waterrower.tracker.data.AppPreferences
 import com.waterrower.tracker.data.OverlaySettings
 import com.waterrower.tracker.data.RecordingState
 import com.waterrower.tracker.model.ConnectionState
+import com.waterrower.tracker.model.GhostDelta
+import com.waterrower.tracker.model.PaceZone
 import com.waterrower.tracker.model.RowingTelemetry
+import com.waterrower.tracker.model.WorkoutGoal
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -33,6 +39,7 @@ import kotlin.math.roundToInt
  * - Touch events outside the pill pass straight through to the underlying app.
  * - Drag anywhere on screen (clamped to screen & display cutout bounds, position persisted).
  * - Tap to toggle between compact Mini-Pill and Expanded Controls (Pause/Weiter + Stop & Save).
+ * - Optional slim progress bar, peripheral target-pace border tint, and live ghost delta.
  */
 class FloatingOverlayController(
     private val context: Context,
@@ -49,6 +56,9 @@ class FloatingOverlayController(
     private var layoutParams: WindowManager.LayoutParams? = null
     private var statusDot: View? = null
     private var miniLineView: TextView? = null
+    private var progressTrack: LinearLayout? = null
+    private var progressFill: View? = null
+    private var progressRemainder: View? = null
     private var expandedRow: LinearLayout? = null
     private var extraMetricsView: TextView? = null
     private var pauseButton: TextView? = null
@@ -56,13 +66,18 @@ class FloatingOverlayController(
 
     private var pillDrawable: GradientDrawable? = null
     private var dotDrawable: GradientDrawable? = null
+    private var progressFillDrawable: GradientDrawable? = null
     private var pauseBtnDrawable: GradientDrawable? = null
     private var recordBtnDrawable: GradientDrawable? = null
 
     private var appliedOpacity: Float = Float.NaN
+    private var appliedBorderColor: Int = 0
     private var appliedScale: Float = Float.NaN
     private var appliedDotColor: Int = 0
-    private var lastMiniText: String? = null
+    private var appliedProgressVisible: Boolean? = null
+    private var appliedProgressPermille: Int = -1
+    private var appliedProgressColor: Int = 0
+    private var lastMiniKey: String? = null
     private var lastExtraText: String? = null
     private var lastPauseVisible: Boolean? = null
     private var lastPauseText: String? = null
@@ -77,6 +92,8 @@ class FloatingOverlayController(
     private var lastConnection: ConnectionState = ConnectionState.Disconnected
     private var lastRecording: RecordingState = RecordingState.Idle
     private var lastSettings: OverlaySettings = preferences.settings.value
+    private var lastGoal: WorkoutGoal = WorkoutGoal()
+    private var lastGhostDelta: GhostDelta? = null
 
     val isShowing: Boolean get() = rootView != null
 
@@ -89,8 +106,10 @@ class FloatingOverlayController(
         lastSettings = settings
         resetRenderCache()
 
-        val pillBg = createPillBackground(settings.opacity)
+        val pillBg = createPillBackground(settings.opacity, COLOR_CONNECTED_SKY)
         val dotBg = createDotBackground(COLOR_DISCONNECTED)
+        val fillBg = createProgressBarDrawable(COLOR_CONNECTED_SKY)
+        val trackBg = createProgressBarDrawable(Color.argb(70, 148, 163, 184))
         val pauseBg = createChipDrawable(COLOR_AMBER)
         val recordBg = createChipDrawable(COLOR_SKY)
 
@@ -125,6 +144,29 @@ class FloatingOverlayController(
         topRow.addView(dot)
         topRow.addView(miniText)
         container.addView(topRow)
+
+        // Slim goal progress bar (visible only when a distance or duration goal is set)
+        val fillView = View(context).apply {
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 0f)
+            background = fillBg
+        }
+        val remView = View(context).apply {
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
+        }
+        val track = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            background = trackBg
+            visibility = View.GONE
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(3),
+            ).apply {
+                topMargin = dp(6)
+            }
+            addView(fillView)
+            addView(remView)
+        }
+        container.addView(track)
 
         // Expandable bottom section (shown on tap)
         val expanded = LinearLayout(context).apply {
@@ -263,15 +305,20 @@ class FloatingOverlayController(
             layoutParams = params
             statusDot = dot
             miniLineView = miniText
+            progressTrack = track
+            progressFill = fillView
+            progressRemainder = remView
             expandedRow = expanded
             extraMetricsView = extraMetrics
             pauseButton = pauseBtn
             recordButton = recBtn
             pillDrawable = pillBg
             dotDrawable = dotBg
+            progressFillDrawable = fillBg
             pauseBtnDrawable = pauseBg
             recordBtnDrawable = recordBg
             appliedOpacity = settings.opacity
+            appliedBorderColor = COLOR_CONNECTED_SKY
             appliedScale = settings.scale
             appliedDotColor = COLOR_DISCONNECTED
             lastAppliedSettingsX = settings.overlayX
@@ -293,12 +340,16 @@ class FloatingOverlayController(
         layoutParams = null
         statusDot = null
         miniLineView = null
+        progressTrack = null
+        progressFill = null
+        progressRemainder = null
         expandedRow = null
         extraMetricsView = null
         pauseButton = null
         recordButton = null
         pillDrawable = null
         dotDrawable = null
+        progressFillDrawable = null
         pauseBtnDrawable = null
         recordBtnDrawable = null
         isExpanded = false
@@ -342,11 +393,15 @@ class FloatingOverlayController(
         connection: ConnectionState = lastConnection,
         recording: RecordingState = lastRecording,
         settings: OverlaySettings = lastSettings,
+        goal: WorkoutGoal = lastGoal,
+        ghostDelta: GhostDelta? = lastGhostDelta,
     ) {
         lastTelemetry = telemetry
         lastConnection = connection
         lastRecording = recording
         lastSettings = settings
+        lastGoal = goal
+        lastGhostDelta = ghostDelta
         render()
     }
 
@@ -371,9 +426,29 @@ class FloatingOverlayController(
             }
         }
 
-        if (lastSettings.opacity != appliedOpacity) {
-            updatePillDrawable(pillDrawable, lastSettings.opacity)
+        val rec = lastRecording
+        val elapsedSec = when (rec) {
+            is RecordingState.Active -> rec.elapsedSeconds
+            RecordingState.Idle -> lastTelemetry.elapsedSeconds
+        }
+        val distMeters = when (rec) {
+            is RecordingState.Active -> rec.distanceMeters
+            RecordingState.Idle -> lastTelemetry.distanceMeters
+        }
+
+        val paceZone = lastGoal.evaluatePaceZone(lastTelemetry.paceSecondsPer500m)
+        val borderBaseColor = when {
+            lastGoal.isCompleted(distMeters, elapsedSec) -> COLOR_ACTIVE_GREEN
+            paceZone == PaceZone.ON_TARGET -> COLOR_ACTIVE_GREEN
+            paceZone == PaceZone.SLOWER -> COLOR_AMBER
+            paceZone == PaceZone.FASTER -> COLOR_CONNECTED_SKY
+            else -> COLOR_CONNECTED_SKY
+        }
+
+        if (lastSettings.opacity != appliedOpacity || borderBaseColor != appliedBorderColor) {
+            updatePillDrawable(pillDrawable, lastSettings.opacity, borderBaseColor)
             appliedOpacity = lastSettings.opacity
+            appliedBorderColor = borderBaseColor
         }
 
         if (lastSettings.scale != appliedScale) {
@@ -382,7 +457,6 @@ class FloatingOverlayController(
             appliedScale = lastSettings.scale
         }
 
-        val rec = lastRecording
         val dotColor = when {
             rec is RecordingState.Active && !rec.isPaused -> COLOR_ACTIVE_GREEN
             rec is RecordingState.Active && rec.isPaused -> COLOR_AMBER
@@ -396,24 +470,68 @@ class FloatingOverlayController(
         }
 
         val spmText = String.format(Locale.US, "%.0f", lastTelemetry.strokeRateSpm)
-        val elapsedToShow = when (rec) {
-            is RecordingState.Active -> RowingTelemetry.formatDuration(rec.elapsedSeconds)
-            RecordingState.Idle -> lastTelemetry.formattedElapsed
-        }
-        val distToShow = when (rec) {
-            is RecordingState.Active -> RowingTelemetry.formatDistance(rec.distanceMeters)
-            RecordingState.Idle -> lastTelemetry.formattedDistance
-        }
+        val elapsedToShow = RowingTelemetry.formatDuration(elapsedSec)
+        val distToShow = RowingTelemetry.formatDistance(distMeters)
         val wattsSuffix = if (lastSettings.showWattsInMini && lastTelemetry.watts > 0) {
             "  •  ${lastTelemetry.watts} W"
         } else {
             ""
         }
-        val miniText =
+        val baseMini =
             "${lastTelemetry.formattedPace} /500m  •  $spmText spm  •  $distToShow  •  $elapsedToShow$wattsSuffix"
-        if (miniText != lastMiniText) {
-            miniLineView?.text = miniText
-            lastMiniText = miniText
+        val ghost = lastGhostDelta
+        val ghostSuffix = ghost?.let { "  •  ${it.formattedCompact}" } ?: ""
+        val ghostColor = when {
+            ghost == null -> 0
+            ghost.deltaMeters > 0 -> COLOR_ACTIVE_GREEN
+            ghost.deltaMeters < 0 -> COLOR_AMBER
+            else -> COLOR_CONNECTED_SKY
+        }
+        val miniKey = "$baseMini|$ghostSuffix|$ghostColor"
+        if (miniKey != lastMiniKey) {
+            if (ghost == null) {
+                miniLineView?.text = baseMini
+            } else {
+                val spannable = SpannableStringBuilder(baseMini)
+                spannable.append("  •  ")
+                val start = spannable.length
+                spannable.append(ghost.formattedCompact)
+                spannable.setSpan(
+                    ForegroundColorSpan(ghostColor),
+                    start,
+                    spannable.length,
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+                )
+                miniLineView?.text = spannable
+            }
+            lastMiniKey = miniKey
+        }
+
+        // Update slim goal progress bar
+        val progress = lastGoal.progressFraction(distMeters, elapsedSec)
+        val showProgress = progress != null
+        if (appliedProgressVisible != showProgress) {
+            progressTrack?.visibility = if (showProgress) View.VISIBLE else View.GONE
+            appliedProgressVisible = showProgress
+        }
+        if (progress != null) {
+            val permille = (progress * 1000f).roundToInt().coerceIn(0, 1000)
+            if (permille != appliedProgressPermille) {
+                val fillLp = progressFill?.layoutParams as? LinearLayout.LayoutParams
+                val remLp = progressRemainder?.layoutParams as? LinearLayout.LayoutParams
+                if (fillLp != null && remLp != null) {
+                    fillLp.weight = permille / 1000f
+                    remLp.weight = (1000 - permille) / 1000f
+                    progressFill?.layoutParams = fillLp
+                    progressRemainder?.layoutParams = remLp
+                }
+                appliedProgressPermille = permille
+            }
+            val barColor = if (permille >= 1000) COLOR_ACTIVE_GREEN else COLOR_CONNECTED_SKY
+            if (barColor != appliedProgressColor) {
+                progressFillDrawable?.setColor(barColor)
+                appliedProgressColor = barColor
+            }
         }
 
         if (isExpanded) {
@@ -426,7 +544,8 @@ class FloatingOverlayController(
                 RecordingState.Idle -> lastTelemetry.strokeCount
             }
             val hrPart = lastTelemetry.heartRateBpm?.let { "  •  $it bpm" } ?: ""
-            val extraText = "${lastTelemetry.watts} W  •  $caloriesToShow kcal  •  $strokesToShow Züge$hrPart"
+            val remPart = lastGoal.remainingSummary(distMeters, elapsedSec)?.let { "  •  $it" } ?: ""
+            val extraText = "${lastTelemetry.watts} W  •  $caloriesToShow kcal  •  $strokesToShow Züge$hrPart$remPart"
             if (extraText != lastExtraText) {
                 extraMetricsView?.text = extraText
                 lastExtraText = extraText
@@ -529,9 +648,13 @@ class FloatingOverlayController(
 
     private fun resetRenderCache() {
         appliedOpacity = Float.NaN
+        appliedBorderColor = 0
         appliedScale = Float.NaN
         appliedDotColor = 0
-        lastMiniText = null
+        appliedProgressVisible = null
+        appliedProgressPermille = -1
+        appliedProgressColor = 0
+        lastMiniKey = null
         lastExtraText = null
         lastPauseVisible = null
         lastPauseText = null
@@ -570,18 +693,31 @@ class FloatingOverlayController(
             setColor(color)
         }
 
-    private fun createPillBackground(opacity: Float): GradientDrawable =
+    private fun createProgressBarDrawable(color: Int): GradientDrawable =
+        GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(3).toFloat()
+            setColor(color)
+        }
+
+    private fun createPillBackground(opacity: Float, borderBaseColor: Int): GradientDrawable =
         GradientDrawable().apply {
             shape = GradientDrawable.RECTANGLE
             cornerRadius = dp(18).toFloat()
-            updatePillDrawable(this, opacity)
+            updatePillDrawable(this, opacity, borderBaseColor)
         }
 
-    private fun updatePillDrawable(drawable: GradientDrawable?, opacity: Float) {
+    private fun updatePillDrawable(drawable: GradientDrawable?, opacity: Float, borderBaseColor: Int) {
         if (drawable == null) return
         val alphaInt = (opacity.coerceIn(0.35f, 1.0f) * 255).roundToInt()
         val bgColor = Color.argb(alphaInt, 11, 18, 26)
-        val borderColor = Color.argb((alphaInt * 0.9f).roundToInt().coerceAtMost(255), 56, 189, 248)
+        val borderAlpha = (alphaInt * 0.9f).roundToInt().coerceAtMost(255)
+        val borderColor = Color.argb(
+            borderAlpha,
+            Color.red(borderBaseColor),
+            Color.green(borderBaseColor),
+            Color.blue(borderBaseColor),
+        )
         drawable.setColor(bgColor)
         drawable.setStroke(dp(1), borderColor)
     }

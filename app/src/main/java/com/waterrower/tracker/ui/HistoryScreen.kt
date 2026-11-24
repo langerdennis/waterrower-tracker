@@ -22,12 +22,15 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.EmojiEvents
 import androidx.compose.material.icons.rounded.Rowing
+import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -45,7 +48,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.waterrower.tracker.data.WorkoutEntity
+import com.waterrower.tracker.model.PersonalBests
 import com.waterrower.tracker.model.RowingTelemetry
+import com.waterrower.tracker.model.WorkoutAnalytics
 import com.waterrower.tracker.ui.theme.LocalRowingColors
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -62,6 +67,7 @@ private enum class HistoryFilter(val label: String) {
 fun HistoryScreen(
     workouts: List<WorkoutEntity>,
     onSelectWorkout: (String) -> Unit,
+    onOpenSettings: () -> Unit,
 ) {
     val dateFormat = remember { SimpleDateFormat("dd.MM.yyyy • HH:mm", Locale.GERMANY) }
     val colorScheme = MaterialTheme.colorScheme
@@ -85,6 +91,10 @@ fun HistoryScreen(
         }
     }
 
+    val personalBests = remember(filteredWorkouts) {
+        WorkoutAnalytics.computePersonalBests(filteredWorkouts)
+    }
+
     val totalMeters = filteredWorkouts.sumOf { it.totalDistanceMeters }
     val totalSeconds = filteredWorkouts.sumOf { it.durationSeconds }
 
@@ -99,35 +109,49 @@ fun HistoryScreen(
                 .padding(horizontal = 20.dp, vertical = 16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            FlowRow(
+            Row(
                 modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
-                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text(
-                    text = "Trainingshistorie",
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.Bold,
-                )
+                FlowRow(
+                    modifier = Modifier.weight(1f),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        text = "Trainingshistorie",
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold,
+                    )
 
-                if (workouts.isNotEmpty()) {
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        HistoryFilter.entries.forEach { filter ->
-                            val count = when (filter) {
-                                HistoryFilter.REAL -> realCount
-                                HistoryFilter.SIMULATED -> simCount
-                                HistoryFilter.ALL -> workouts.size
+                    if (workouts.isNotEmpty()) {
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            HistoryFilter.entries.forEach { filter ->
+                                val count = when (filter) {
+                                    HistoryFilter.REAL -> realCount
+                                    HistoryFilter.SIMULATED -> simCount
+                                    HistoryFilter.ALL -> workouts.size
+                                }
+                                FilterChip(
+                                    selected = activeFilter == filter,
+                                    onClick = { explicitFilter = filter },
+                                    label = { Text("${filter.label} ($count)") },
+                                )
                             }
-                            FilterChip(
-                                selected = activeFilter == filter,
-                                onClick = { explicitFilter = filter },
-                                label = { Text("${filter.label} ($count)") },
-                            )
                         }
                     }
+                }
+
+                IconButton(onClick = onOpenSettings) {
+                    Icon(
+                        imageVector = Icons.Rounded.Settings,
+                        contentDescription = "Einstellungen öffnen",
+                        tint = colorScheme.onSurfaceVariant,
+                    )
                 }
             }
 
@@ -153,6 +177,10 @@ fun HistoryScreen(
                     )
                     SummaryStat("GESAMTZEIT", RowingTelemetry.formatDuration(totalSeconds))
                 }
+            }
+
+            if (personalBests.hasAnyRecord) {
+                PersonalBestsBanner(bests = personalBests)
             }
 
             if (filteredWorkouts.isEmpty()) {
@@ -297,6 +325,79 @@ fun HistoryScreen(
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun PersonalBestsBanner(bests: PersonalBests) {
+    val colorScheme = MaterialTheme.colorScheme
+    val rowingColors = LocalRowingColors.current
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = colorScheme.surfaceContainerLow),
+        shape = MaterialTheme.shapes.medium,
+        border = BorderStroke(1.dp, colorScheme.outlineVariant.copy(alpha = 0.45f)),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 18.dp, vertical = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.EmojiEvents,
+                    contentDescription = null,
+                    tint = rowingColors.warning,
+                    modifier = Modifier.size(18.dp),
+                )
+                Text(
+                    text = "Woche & Bestleistungen",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(20.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                MiniStat(
+                    label = "LETZTE 7 TAGE",
+                    value = "${RowingTelemetry.formatDistance(bests.weeklyDistanceMeters)} (${bests.weeklyWorkoutCount})",
+                    color = rowingColors.distance,
+                )
+                MiniStat(
+                    label = "LÄNGSTE EINHEIT",
+                    value = RowingTelemetry.formatDistance(bests.longestDistanceMeters),
+                )
+                bests.best500mPlusPaceSec?.let { pace ->
+                    MiniStat(
+                        label = "BESTE Ø PACE",
+                        value = "${RowingTelemetry.formatPace(pace)} /500m",
+                        color = rowingColors.pace,
+                    )
+                }
+                bests.best2kPaceSec?.let { pace ->
+                    MiniStat(
+                        label = "PR ≥ 2.000 m",
+                        value = "${RowingTelemetry.formatPace(pace)} /500m",
+                        color = rowingColors.pace,
+                    )
+                }
+                bests.best5kPaceSec?.let { pace ->
+                    MiniStat(
+                        label = "PR ≥ 5.000 m",
+                        value = "${RowingTelemetry.formatPace(pace)} /500m",
+                        color = rowingColors.pace,
+                    )
                 }
             }
         }

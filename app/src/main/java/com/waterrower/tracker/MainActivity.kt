@@ -360,7 +360,7 @@ class MainActivity : ComponentActivity() {
         }
 
         if (!Settings.canDrawOverlays(this)) {
-            hub.emitUiMessage("Bitte erlaube „Über anderen Apps einblenden“ für WaterRower Tracker.")
+            hub.emitUiMessage("Bitte erlaube „Über anderen Apps einblenden“ für WaterRower.")
             val intent = Intent(
                 Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
                 Uri.parse("package:$packageName"),
@@ -416,6 +416,9 @@ private fun WaterRowerRoot(
     val scannedDevices by hub.scannedDevices.collectAsStateWithLifecycle()
     val diagnostics by hub.diagnostics.collectAsStateWithLifecycle()
     val recordingState by hub.recordingState.collectAsStateWithLifecycle()
+    val activeGoal by hub.activeGoal.collectAsStateWithLifecycle()
+    val ghostReference by hub.ghostReference.collectAsStateWithLifecycle()
+    val ghostDelta by hub.ghostDelta.collectAsStateWithLifecycle()
     val isOverlayVisible by hub.isOverlayVisible.collectAsStateWithLifecycle()
     val isSimulatorMode by hub.isSimulatorMode.collectAsStateWithLifecycle()
     val settings by prefs.settings.collectAsStateWithLifecycle()
@@ -487,6 +490,16 @@ private fun WaterRowerRoot(
         )
     }
 
+    val openSettingsTab: () -> Unit = {
+        selectedTab = AppTab.SETTINGS
+        selectedWorkoutId = null
+    }
+    val startGhostFromDetail: (String) -> Unit = { workoutId ->
+        hub.selectGhostWorkout(workoutId)
+        selectedWorkoutId = null
+        selectedTab = AppTab.ROWING
+    }
+
     Surface(
         color = MaterialTheme.colorScheme.background,
         modifier = Modifier.fillMaxSize(),
@@ -514,7 +527,7 @@ private fun WaterRowerRoot(
                                 ) {
                                     Icon(
                                         imageVector = Icons.Rounded.Rowing,
-                                        contentDescription = "WaterRower Tracker",
+                                        contentDescription = "WaterRower",
                                         tint = MaterialTheme.colorScheme.onPrimaryContainer,
                                         modifier = Modifier.size(24.dp),
                                     )
@@ -537,7 +550,7 @@ private fun WaterRowerRoot(
                             Spacer(Modifier.height(4.dp))
                         },
                     ) {
-                        AppTab.entries.forEach { tab ->
+                        listOf(AppTab.ROWING, AppTab.HISTORY).forEach { tab ->
                             NavigationRailItem(
                                 selected = selectedTab == tab,
                                 onClick = {
@@ -548,6 +561,14 @@ private fun WaterRowerRoot(
                                 label = { Text(tab.label) },
                             )
                         }
+                        Spacer(Modifier.weight(1f))
+                        NavigationRailItem(
+                            selected = selectedTab == AppTab.SETTINGS,
+                            onClick = openSettingsTab,
+                            icon = { Icon(AppTab.SETTINGS.icon, contentDescription = AppTab.SETTINGS.label) },
+                            label = { Text(AppTab.SETTINGS.label) },
+                        )
+                        Spacer(Modifier.height(8.dp))
                     }
                     VerticalDivider(
                         color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
@@ -570,12 +591,17 @@ private fun WaterRowerRoot(
                                 selectedWorkoutId = selectedWorkoutId,
                                 onSelectWorkout = { selectedWorkoutId = it },
                                 onBackFromDetail = { selectedWorkoutId = null },
+                                onOpenSettings = openSettingsTab,
+                                onStartGhostFromDetail = startGhostFromDetail,
                                 connectionState = connectionState,
                                 telemetry = telemetry,
                                 batteryPercent = batteryPercent,
                                 scannedDevices = scannedDevices,
                                 diagnostics = diagnostics,
                                 recordingState = recordingState,
+                                activeGoal = activeGoal,
+                                ghostReference = ghostReference,
+                                ghostDelta = ghostDelta,
                                 isOverlayVisible = isOverlayVisible,
                                 isSimulatorMode = isSimulatorMode,
                                 isBackupBusy = isBackupBusy,
@@ -628,12 +654,17 @@ private fun WaterRowerRoot(
                             selectedWorkoutId = selectedWorkoutId,
                             onSelectWorkout = { selectedWorkoutId = it },
                             onBackFromDetail = { selectedWorkoutId = null },
+                            onOpenSettings = openSettingsTab,
+                            onStartGhostFromDetail = startGhostFromDetail,
                             connectionState = connectionState,
                             telemetry = telemetry,
                             batteryPercent = batteryPercent,
                             scannedDevices = scannedDevices,
                             diagnostics = diagnostics,
                             recordingState = recordingState,
+                            activeGoal = activeGoal,
+                            ghostReference = ghostReference,
+                            ghostDelta = ghostDelta,
                             isOverlayVisible = isOverlayVisible,
                             isSimulatorMode = isSimulatorMode,
                             isBackupBusy = isBackupBusy,
@@ -662,12 +693,17 @@ private fun TabContent(
     selectedWorkoutId: String?,
     onSelectWorkout: (String) -> Unit,
     onBackFromDetail: () -> Unit,
+    onOpenSettings: () -> Unit,
+    onStartGhostFromDetail: (String) -> Unit,
     connectionState: com.waterrower.tracker.model.ConnectionState,
     telemetry: com.waterrower.tracker.model.RowingTelemetry,
     batteryPercent: Int?,
     scannedDevices: List<com.waterrower.tracker.model.ScannedDevice>,
     diagnostics: com.waterrower.tracker.model.BleDiagnostics,
     recordingState: RecordingState,
+    activeGoal: com.waterrower.tracker.model.WorkoutGoal,
+    ghostReference: com.waterrower.tracker.model.GhostReference?,
+    ghostDelta: com.waterrower.tracker.model.GhostDelta?,
     isOverlayVisible: Boolean,
     isSimulatorMode: Boolean,
     isBackupBusy: Boolean,
@@ -697,6 +733,10 @@ private fun TabContent(
             isOverlayVisible = isOverlayVisible,
             isSimulatorMode = isSimulatorMode,
             settings = settings,
+            activeGoal = activeGoal,
+            ghostReference = ghostReference,
+            ghostDelta = ghostDelta,
+            recentWorkouts = workouts,
             onStartScan = {
                 onRequestBleAndRun {
                     RowingForegroundService.startService(activity)
@@ -711,18 +751,15 @@ private fun TabContent(
                 }
             },
             onConnectSimulator = onReconnectSimulator,
+            onDisableSimulator = { hub.setSimulatorMode(false) },
             onDisconnect = { hub.disconnect() },
-            onToggleSimulator = { enabled ->
-                if (enabled) {
-                    onStartSimulator()
-                } else {
-                    hub.setSimulatorMode(false)
-                }
-            },
             onToggleOverlay = onToggleOverlay,
             onStartRecording = { hub.startRecording() },
             onTogglePause = { hub.togglePauseRecording() },
             onStopAndSave = { hub.stopAndSaveRecording() },
+            onUpdateGoal = { hub.setWorkoutGoal(it) },
+            onSelectGhostWorkout = { hub.selectGhostWorkout(it) },
+            onOpenSettings = onOpenSettings,
         )
         AppTab.HISTORY -> {
             if (selectedWorkoutId != null) {
@@ -730,18 +767,22 @@ private fun TabContent(
                     workoutId = selectedWorkoutId,
                     hub = hub,
                     onBack = onBackFromDetail,
+                    onStartGhost = onStartGhostFromDetail,
                     onShowMessage = onShowMessage,
                 )
             } else {
                 HistoryScreen(
                     workouts = workouts,
                     onSelectWorkout = onSelectWorkout,
+                    onOpenSettings = onOpenSettings,
                 )
             }
         }
         AppTab.SETTINGS -> SettingsScreen(
             settings = settings,
             diagnostics = diagnostics,
+            connectionState = connectionState,
+            isSimulatorMode = isSimulatorMode,
             workoutCount = workouts.size,
             isBackupBusy = isBackupBusy,
             onOpacityChange = { prefs.setOpacity(it) },
@@ -752,6 +793,14 @@ private fun TabContent(
             onResetOverlayPosition = onResetOverlayPosition,
             onExportBackup = onExportBackup,
             onImportBackup = onImportBackup,
+            onToggleSimulator = { enabled ->
+                if (enabled) {
+                    onStartSimulator()
+                } else {
+                    hub.setSimulatorMode(false)
+                }
+            },
+            onConnectSimulator = onReconnectSimulator,
             onShowMessage = onShowMessage,
         )
     }

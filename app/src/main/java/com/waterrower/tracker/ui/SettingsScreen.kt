@@ -34,6 +34,7 @@ import androidx.compose.material.icons.rounded.FileUpload
 import androidx.compose.material.icons.rounded.PictureInPictureAlt
 import androidx.compose.material.icons.rounded.PlayCircleOutline
 import androidx.compose.material.icons.rounded.RestartAlt
+import androidx.compose.material.icons.rounded.Science
 import androidx.compose.material.icons.rounded.Storage
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -66,6 +67,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.waterrower.tracker.data.OverlaySettings
 import com.waterrower.tracker.model.BleDiagnostics
+import com.waterrower.tracker.model.ConnectionState
 import com.waterrower.tracker.ui.theme.LocalRowingColors
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -79,6 +81,8 @@ private val AUTO_FINISH_OPTIONS = listOf(0, 2, 3, 5)
 fun SettingsScreen(
     settings: OverlaySettings,
     diagnostics: BleDiagnostics,
+    connectionState: ConnectionState,
+    isSimulatorMode: Boolean,
     workoutCount: Int,
     isBackupBusy: Boolean,
     onOpacityChange: (Float) -> Unit,
@@ -89,6 +93,8 @@ fun SettingsScreen(
     onResetOverlayPosition: () -> Unit,
     onExportBackup: () -> Unit,
     onImportBackup: () -> Unit,
+    onToggleSimulator: (Boolean) -> Unit,
+    onConnectSimulator: () -> Unit,
     onShowMessage: (String) -> Unit,
 ) {
     val colorScheme = MaterialTheme.colorScheme
@@ -413,7 +419,7 @@ fun SettingsScreen(
                 }
             }
 
-            // 3. Collapsible BLE Diagnostics for S4 Comms 61
+            // 3. Collapsible Developer Tools & BLE Diagnostics
             Card(
                 colors = CardDefaults.cardColors(containerColor = colorScheme.surfaceContainerLow),
                 shape = MaterialTheme.shapes.medium,
@@ -441,12 +447,13 @@ fun SettingsScreen(
                             )
                             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                 Text(
-                                    text = "BLE-Diagnose (S4 Comms 61 / FTMS)",
+                                    text = "Entwickler & BLE-Diagnose",
                                     style = MaterialTheme.typography.titleMedium,
                                     fontWeight = FontWeight.SemiBold,
                                 )
+                                val simNote = if (isSimulatorMode) "Simulator aktiv  •  " else ""
                                 Text(
-                                    text = "${diagnostics.packetCount} Pakete  •  FW ${diagnostics.firmwareRevision ?: "--"}" +
+                                    text = "$simNote${diagnostics.packetCount} Pakete  •  FW ${diagnostics.firmwareRevision ?: "--"}" +
                                         if (diagnostics.truncatedPacketCount > 0L) {
                                             "  •  ${diagnostics.truncatedPacketCount} abgeschnitten"
                                         } else {
@@ -475,6 +482,27 @@ fun SettingsScreen(
                                 .padding(start = 18.dp, end = 18.dp, bottom = 18.dp),
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
+                            HorizontalDivider(color = colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+                            SettingToggleRow(
+                                title = "Simulator-Modus (Debug)",
+                                subtitle = "Erzeugt simulierte Ruderdaten ohne WaterRower S4",
+                                checked = isSimulatorMode,
+                                onCheckedChange = onToggleSimulator,
+                            )
+
+                            if (isSimulatorMode && connectionState !is ConnectionState.Connected) {
+                                FilledTonalButton(onClick = onConnectSimulator) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Science,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("Simulator neu verbinden")
+                                }
+                            }
+
                             HorizontalDivider(color = colorScheme.outlineVariant.copy(alpha = 0.5f))
 
                             DiagLine("Empfangene Pakete", "${diagnostics.packetCount}")

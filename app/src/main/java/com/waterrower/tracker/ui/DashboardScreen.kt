@@ -28,35 +28,49 @@ import androidx.compose.material.icons.rounded.Bluetooth
 import androidx.compose.material.icons.rounded.BluetoothConnected
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Favorite
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Flag
 import androidx.compose.material.icons.rounded.LocalFireDepartment
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PictureInPictureAlt
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Remove
 import androidx.compose.material.icons.rounded.Repeat
 import androidx.compose.material.icons.rounded.Science
+import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Straighten
 import androidx.compose.material.icons.rounded.Timer
 import androidx.compose.material.icons.rounded.Waves
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontFamily
@@ -66,11 +80,19 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.waterrower.tracker.data.OverlaySettings
 import com.waterrower.tracker.data.RecordingState
+import com.waterrower.tracker.data.WorkoutEntity
 import com.waterrower.tracker.model.ConnectionState
+import com.waterrower.tracker.model.GhostDelta
+import com.waterrower.tracker.model.GhostReference
+import com.waterrower.tracker.model.PaceZone
 import com.waterrower.tracker.model.RowingTelemetry
 import com.waterrower.tracker.model.ScannedDevice
+import com.waterrower.tracker.model.WorkoutGoal
 import com.waterrower.tracker.ui.theme.LocalRowingColors
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
+import kotlin.math.roundToInt
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -83,16 +105,23 @@ fun DashboardScreen(
     isOverlayVisible: Boolean,
     isSimulatorMode: Boolean,
     settings: OverlaySettings,
+    activeGoal: WorkoutGoal,
+    ghostReference: GhostReference?,
+    ghostDelta: GhostDelta?,
+    recentWorkouts: List<WorkoutEntity>,
     onStartScan: () -> Unit,
     onStopScan: () -> Unit,
     onConnectDevice: (address: String, name: String) -> Unit,
     onConnectSimulator: () -> Unit,
+    onDisableSimulator: () -> Unit,
     onDisconnect: () -> Unit,
-    onToggleSimulator: (Boolean) -> Unit,
     onToggleOverlay: () -> Unit,
     onStartRecording: () -> Unit,
     onTogglePause: () -> Unit,
     onStopAndSave: () -> Unit,
+    onUpdateGoal: (WorkoutGoal) -> Unit,
+    onSelectGhostWorkout: (String?) -> Unit,
+    onOpenSettings: () -> Unit,
 ) {
     val view = LocalView.current
     val shouldKeepScreenOn = connectionState is ConnectionState.Connected ||
@@ -107,6 +136,23 @@ fun DashboardScreen(
 
     val colorScheme = MaterialTheme.colorScheme
     val rowingColors = LocalRowingColors.current
+    var showGoalDialog by remember { mutableStateOf(false) }
+
+    if (showGoalDialog) {
+        GoalAndGhostDialog(
+            initialGoal = activeGoal,
+            initialGhostId = ghostReference?.workoutId,
+            recentWorkouts = recentWorkouts,
+            onDismiss = { showGoalDialog = false },
+            onApply = { newGoal, ghostId ->
+                onUpdateGoal(newGoal)
+                if (ghostId != ghostReference?.workoutId) {
+                    onSelectGhostWorkout(ghostId)
+                }
+                showGoalDialog = false
+            },
+        )
+    }
 
     Column(
         modifier = Modifier
@@ -115,25 +161,28 @@ fun DashboardScreen(
             .padding(horizontal = 20.dp, vertical = 16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        // 1. Unified Compact Cockpit Control Card (fits all 8 live metrics above the fold on tablets)
+        // 1. Unified Compact Cockpit Control Card
         CockpitControlCard(
             connectionState = connectionState,
             batteryPercent = batteryPercent,
             recordingState = recordingState,
             isOverlayVisible = isOverlayVisible,
             isSimulatorMode = isSimulatorMode,
+            hasActiveGoalOrGhost = activeGoal.hasAnyTarget || ghostReference != null,
             lastDeviceAddress = settings.lastDeviceAddress,
             lastDeviceName = settings.lastDeviceName,
             onStartScan = onStartScan,
             onStopScan = onStopScan,
             onConnectDevice = onConnectDevice,
             onConnectSimulator = onConnectSimulator,
+            onDisableSimulator = onDisableSimulator,
             onDisconnect = onDisconnect,
-            onToggleSimulator = onToggleSimulator,
             onToggleOverlay = onToggleOverlay,
             onStartRecording = onStartRecording,
             onTogglePause = onTogglePause,
             onStopAndSave = onStopAndSave,
+            onOpenGoalDialog = { showGoalDialog = true },
+            onOpenSettings = onOpenSettings,
         )
 
         // 2. Scanned Devices List (visible when scanning or devices discovered while disconnected)
@@ -216,14 +265,16 @@ fun DashboardScreen(
         }
 
         // 3. Live Metrics Cockpit (uses workout deltas during active recording)
-        val displayDistance = when (recordingState) {
-            is RecordingState.Active -> RowingTelemetry.formatDistance(recordingState.distanceMeters)
-            RecordingState.Idle -> telemetry.formattedDistance
+        val liveDistanceMeters = when (recordingState) {
+            is RecordingState.Active -> recordingState.distanceMeters
+            RecordingState.Idle -> telemetry.distanceMeters
         }
-        val displayTime = when (recordingState) {
-            is RecordingState.Active -> RowingTelemetry.formatDuration(recordingState.elapsedSeconds)
-            RecordingState.Idle -> telemetry.formattedElapsed
+        val liveElapsedSeconds = when (recordingState) {
+            is RecordingState.Active -> recordingState.elapsedSeconds
+            RecordingState.Idle -> telemetry.elapsedSeconds
         }
+        val displayDistance = RowingTelemetry.formatDistance(liveDistanceMeters)
+        val displayTime = RowingTelemetry.formatDuration(liveElapsedSeconds)
         val displayCalories = when (recordingState) {
             is RecordingState.Active -> recordingState.calories
             RecordingState.Idle -> telemetry.calories
@@ -233,6 +284,23 @@ fun DashboardScreen(
             RecordingState.Idle -> telemetry.strokeCount
         }
         val spmFormatted = String.format(Locale.US, "%.1f", telemetry.strokeRateSpm)
+
+        // Active Goal & Ghost Progress Banner (shown only when a goal or ghost is configured)
+        AnimatedVisibility(visible = activeGoal.hasAnyTarget || ghostReference != null) {
+            ActiveGoalAndGhostCard(
+                goal = activeGoal,
+                ghostReference = ghostReference,
+                ghostDelta = ghostDelta,
+                distanceMeters = liveDistanceMeters,
+                elapsedSeconds = liveElapsedSeconds,
+                currentPaceSec = telemetry.paceSecondsPer500m,
+                onEdit = { showGoalDialog = true },
+                onClearAll = {
+                    onUpdateGoal(WorkoutGoal())
+                    onSelectGhostWorkout(null)
+                },
+            )
+        }
 
         val hasHeartRate = telemetry.heartRateBpm != null
 
@@ -351,18 +419,21 @@ private fun CockpitControlCard(
     recordingState: RecordingState,
     isOverlayVisible: Boolean,
     isSimulatorMode: Boolean,
+    hasActiveGoalOrGhost: Boolean,
     lastDeviceAddress: String?,
     lastDeviceName: String?,
     onStartScan: () -> Unit,
     onStopScan: () -> Unit,
     onConnectDevice: (String, String) -> Unit,
     onConnectSimulator: () -> Unit,
+    onDisableSimulator: () -> Unit,
     onDisconnect: () -> Unit,
-    onToggleSimulator: (Boolean) -> Unit,
     onToggleOverlay: () -> Unit,
     onStartRecording: () -> Unit,
     onTogglePause: () -> Unit,
     onStopAndSave: () -> Unit,
+    onOpenGoalDialog: () -> Unit,
+    onOpenSettings: () -> Unit,
 ) {
     val colorScheme = MaterialTheme.colorScheme
     val rowingColors = LocalRowingColors.current
@@ -405,39 +476,40 @@ private fun CockpitControlCard(
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            // Top Status & Badges Row
-            FlowRow(
+            // Top Status, Badges & Settings shortcut Row
+            Row(
                 modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
-                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(11.dp)
-                            .clip(CircleShape)
-                            .background(statusColor),
-                    )
-                    Icon(
-                        imageVector = statusIcon,
-                        contentDescription = null,
-                        tint = statusColor,
-                        modifier = Modifier.size(20.dp),
-                    )
-                    Text(
-                        text = statusText,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                }
-
                 FlowRow(
+                    modifier = Modifier.weight(1f),
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(11.dp)
+                                .clip(CircleShape)
+                                .background(statusColor),
+                        )
+                        Icon(
+                            imageVector = statusIcon,
+                            contentDescription = null,
+                            tint = statusColor,
+                            modifier = Modifier.size(20.dp),
+                        )
+                        Text(
+                            text = statusText,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+
                     if (recordingState is RecordingState.Active) {
                         val pillBg = if (recordingState.isPaused) {
                             colorScheme.tertiaryContainer
@@ -509,32 +581,50 @@ private fun CockpitControlCard(
                         }
                     }
 
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        Icon(
-                            Icons.Rounded.Science,
-                            contentDescription = null,
-                            tint = if (isSimulatorMode) colorScheme.primary else colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(18.dp),
-                        )
-                        Text(
-                            text = "Simulator",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = if (isSimulatorMode) colorScheme.primary else colorScheme.onSurfaceVariant,
-                        )
-                        Switch(
-                            checked = isSimulatorMode,
-                            onCheckedChange = onToggleSimulator,
-                        )
+                    if (isSimulatorMode) {
+                        Surface(
+                            onClick = onDisableSimulator,
+                            color = colorScheme.tertiaryContainer,
+                            contentColor = colorScheme.onTertiaryContainer,
+                            shape = RoundedCornerShape(999.dp),
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                            ) {
+                                Icon(
+                                    Icons.Rounded.Science,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(15.dp),
+                                )
+                                Text(
+                                    text = "Simulator",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                                Icon(
+                                    Icons.Rounded.Close,
+                                    contentDescription = "Simulator beenden",
+                                    modifier = Modifier.size(14.dp),
+                                )
+                            }
+                        }
                     }
+                }
+
+                IconButton(onClick = onOpenSettings) {
+                    Icon(
+                        imageVector = Icons.Rounded.Settings,
+                        contentDescription = "Einstellungen öffnen",
+                        tint = colorScheme.onSurfaceVariant,
+                    )
                 }
             }
 
             HorizontalDivider(color = colorScheme.outlineVariant.copy(alpha = 0.45f))
 
-            // Unified Action Bar: Connection + Overlay + Recording
+            // Unified Action Bar: Connection + Overlay + Goal/Ghost + Recording
             FlowRow(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -597,6 +687,20 @@ private fun CockpitControlCard(
                     )
                 }
 
+                if (hasActiveGoalOrGhost) {
+                    FilledTonalButton(onClick = onOpenGoalDialog) {
+                        Icon(Icons.Rounded.Flag, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Ziel / Ghost")
+                    }
+                } else {
+                    OutlinedButton(onClick = onOpenGoalDialog) {
+                        Icon(Icons.Rounded.Flag, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Ziel / Ghost")
+                    }
+                }
+
                 when (recordingState) {
                     RecordingState.Idle -> {
                         FilledTonalButton(onClick = onStartRecording) {
@@ -628,6 +732,375 @@ private fun CockpitControlCard(
                     }
                 }
             }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ActiveGoalAndGhostCard(
+    goal: WorkoutGoal,
+    ghostReference: GhostReference?,
+    ghostDelta: GhostDelta?,
+    distanceMeters: Int,
+    elapsedSeconds: Int,
+    currentPaceSec: Int,
+    onEdit: () -> Unit,
+    onClearAll: () -> Unit,
+) {
+    val colorScheme = MaterialTheme.colorScheme
+    val rowingColors = LocalRowingColors.current
+    val progress = goal.progressFraction(distanceMeters, elapsedSeconds)
+    val completed = goal.isCompleted(distanceMeters, elapsedSeconds)
+    val remaining = goal.remainingSummary(distanceMeters, elapsedSeconds)
+    val paceZone = goal.evaluatePaceZone(currentPaceSec)
+
+    Card(
+        onClick = onEdit,
+        colors = CardDefaults.cardColors(containerColor = colorScheme.surfaceContainerLow),
+        shape = MaterialTheme.shapes.medium,
+        border = BorderStroke(
+            1.dp,
+            when {
+                completed -> rowingColors.active.copy(alpha = 0.65f)
+                paceZone == PaceZone.ON_TARGET -> rowingColors.active.copy(alpha = 0.55f)
+                paceZone == PaceZone.SLOWER -> rowingColors.warning.copy(alpha = 0.55f)
+                else -> colorScheme.outlineVariant.copy(alpha = 0.55f)
+            },
+        ),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                FlowRow(
+                    modifier = Modifier.weight(1f),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    if (goal.hasAnyTarget) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Flag,
+                                contentDescription = null,
+                                tint = if (completed) rowingColors.active else colorScheme.primary,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Text(
+                                text = "Ziel: ${goal.shortSummary()}",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                        }
+                    }
+
+                    if (remaining != null) {
+                        Surface(
+                            color = if (completed) colorScheme.secondaryContainer else colorScheme.primaryContainer,
+                            contentColor = if (completed) colorScheme.onSecondaryContainer else colorScheme.onPrimaryContainer,
+                            shape = RoundedCornerShape(999.dp),
+                        ) {
+                            Text(
+                                text = remaining,
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp),
+                            )
+                        }
+                    }
+
+                    if (paceZone != PaceZone.NONE) {
+                        val (zoneLabel, zoneColor) = when (paceZone) {
+                            PaceZone.ON_TARGET -> "Pace im Ziel" to rowingColors.active
+                            PaceZone.FASTER -> "Schneller als Ziel" to rowingColors.pace
+                            PaceZone.SLOWER -> "Langsamer als Ziel" to rowingColors.warning
+                            PaceZone.NONE -> "" to colorScheme.onSurfaceVariant
+                        }
+                        Surface(
+                            color = zoneColor.copy(alpha = 0.16f),
+                            contentColor = zoneColor,
+                            shape = RoundedCornerShape(999.dp),
+                        ) {
+                            Text(
+                                text = zoneLabel,
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp),
+                            )
+                        }
+                    }
+
+                    if (ghostReference != null) {
+                        val ghostColor = when {
+                            ghostDelta == null -> colorScheme.onSurfaceVariant
+                            ghostDelta.deltaMeters > 0 -> rowingColors.active
+                            ghostDelta.deltaMeters < 0 -> rowingColors.warning
+                            else -> rowingColors.pace
+                        }
+                        val ghostText = if (ghostDelta != null) {
+                            "Ghost: ${ghostDelta.formattedCompact}" + if (ghostDelta.ghostFinished) " (Ziel)" else ""
+                        } else {
+                            "Ghost: ${ghostReference.label}"
+                        }
+                        Surface(
+                            color = ghostColor.copy(alpha = 0.16f),
+                            contentColor = ghostColor,
+                            shape = RoundedCornerShape(999.dp),
+                        ) {
+                            Text(
+                                text = ghostText,
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp),
+                            )
+                        }
+                    }
+                }
+
+                IconButton(
+                    onClick = onClearAll,
+                    modifier = Modifier.size(32.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Close,
+                        contentDescription = "Ziel & Ghost entfernen",
+                        tint = colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+            }
+
+            if (progress != null) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    LinearProgressIndicator(
+                        progress = { progress },
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(999.dp)),
+                        color = if (completed) rowingColors.active else colorScheme.primary,
+                        trackColor = colorScheme.surfaceContainerHighest,
+                        strokeCap = StrokeCap.Round,
+                    )
+                    Text(
+                        text = "${(progress * 100f).roundToInt()}%",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (completed) rowingColors.active else colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun GoalAndGhostDialog(
+    initialGoal: WorkoutGoal,
+    initialGhostId: String?,
+    recentWorkouts: List<WorkoutEntity>,
+    onDismiss: () -> Unit,
+    onApply: (WorkoutGoal, String?) -> Unit,
+) {
+    var distTarget by remember { mutableStateOf(initialGoal.distanceTargetMeters) }
+    var durTarget by remember { mutableStateOf(initialGoal.durationTargetSeconds) }
+    var paceTarget by remember { mutableStateOf(initialGoal.targetPaceSecPer500m) }
+    var selectedGhostId by remember { mutableStateOf(initialGhostId) }
+
+    val dateFormat = remember { SimpleDateFormat("dd.MM.", Locale.GERMANY) }
+    val ghostCandidates = remember(recentWorkouts) {
+        recentWorkouts.filter { it.totalDistanceMeters >= 100 && it.durationSeconds >= 10 }.take(6)
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Rounded.Flag, contentDescription = null) },
+        title = { Text("Trainingsziel & Ghost-Racer") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                // 1. Distance target
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("Distanz-Ziel", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        listOf(null, 2000, 5000, 10000).forEach { meters ->
+                            FilterChip(
+                                selected = distTarget == meters,
+                                onClick = {
+                                    distTarget = meters
+                                    if (meters != null) durTarget = null
+                                },
+                                label = { Text(meters?.let { RowingTelemetry.formatDistance(it) } ?: "Aus") },
+                            )
+                        }
+                    }
+                    if (distTarget != null) {
+                        StepperRow(
+                            label = RowingTelemetry.formatDistance(distTarget!!),
+                            onDecrement = { distTarget = (distTarget!! - 500).coerceAtLeast(500) },
+                            onIncrement = { distTarget = (distTarget!! + 500).coerceAtMost(50_000) },
+                        )
+                    }
+                }
+
+                // 2. Duration target
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("Zeit-Ziel", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        listOf(null, 20 * 60, 30 * 60, 45 * 60).forEach { secs ->
+                            FilterChip(
+                                selected = durTarget == secs,
+                                onClick = {
+                                    durTarget = secs
+                                    if (secs != null) distTarget = null
+                                },
+                                label = { Text(secs?.let { "${it / 60} Min" } ?: "Aus") },
+                            )
+                        }
+                    }
+                    if (durTarget != null) {
+                        StepperRow(
+                            label = "${durTarget!! / 60} Min",
+                            onDecrement = { durTarget = (durTarget!! - 5 * 60).coerceAtLeast(5 * 60) },
+                            onIncrement = { durTarget = (durTarget!! + 5 * 60).coerceAtMost(180 * 60) },
+                        )
+                    }
+                }
+
+                // 3. Target Pace (/500m)
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        "Ziel-Pace (/500m, ±3 s)",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        listOf(null, 120, 125, 130, 135).forEach { paceSec ->
+                            FilterChip(
+                                selected = paceTarget == paceSec,
+                                onClick = { paceTarget = paceSec },
+                                label = { Text(paceSec?.let { RowingTelemetry.formatPace(it) } ?: "Aus") },
+                            )
+                        }
+                    }
+                    if (paceTarget != null) {
+                        StepperRow(
+                            label = "${RowingTelemetry.formatPace(paceTarget!!)} /500m",
+                            onDecrement = { paceTarget = (paceTarget!! - 5).coerceAtLeast(80) },
+                            onIncrement = { paceTarget = (paceTarget!! + 5).coerceAtMost(240) },
+                        )
+                    }
+                }
+
+                HorizontalDivider()
+
+                // 4. Ghost Racer
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        "Ghost-Racer (gegen frühere Einheit)",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    if (ghostCandidates.isEmpty()) {
+                        Text(
+                            text = "Noch keine gespeicherte Einheit vorhanden.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    } else {
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            FilterChip(
+                                selected = selectedGhostId == null,
+                                onClick = { selectedGhostId = null },
+                                label = { Text("Kein Ghost") },
+                            )
+                            ghostCandidates.forEach { w ->
+                                val chipText =
+                                    "${dateFormat.format(Date(w.startedAtEpochMs))} • ${RowingTelemetry.formatDistance(w.totalDistanceMeters)}"
+                                FilterChip(
+                                    selected = selectedGhostId == w.id,
+                                    onClick = { selectedGhostId = w.id },
+                                    label = { Text(chipText) },
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    onApply(
+                        WorkoutGoal(
+                            distanceTargetMeters = distTarget,
+                            durationTargetSeconds = durTarget,
+                            targetPaceSecPer500m = paceTarget,
+                        ),
+                        selectedGhostId,
+                    )
+                },
+            ) {
+                Text("Übernehmen")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Abbrechen")
+            }
+        },
+    )
+}
+
+@Composable
+private fun StepperRow(
+    label: String,
+    onDecrement: () -> Unit,
+    onIncrement: () -> Unit,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        OutlinedButton(onClick = onDecrement) {
+            Icon(Icons.Rounded.Remove, contentDescription = "Weniger", modifier = Modifier.size(16.dp))
+        }
+        Text(
+            text = label,
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold,
+        )
+        OutlinedButton(onClick = onIncrement) {
+            Icon(Icons.Rounded.Add, contentDescription = "Mehr", modifier = Modifier.size(16.dp))
         }
     }
 }

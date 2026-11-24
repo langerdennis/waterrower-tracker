@@ -124,7 +124,7 @@ jobs:
             cp app/build/outputs/apk/debug/app-debug.apk "$APK_NAME"
           fi
           gh release create "$GITHUB_REF_NAME" "$APK_NAME" \
-            --title "${GITHUB_REF_NAME} — WaterRower S4 Tracker" \
+            --title "${GITHUB_REF_NAME} — WaterRower" \
             --generate-notes
 
 

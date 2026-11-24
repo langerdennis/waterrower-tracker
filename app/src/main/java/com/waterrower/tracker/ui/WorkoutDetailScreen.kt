@@ -24,6 +24,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.Flag
 import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -32,6 +33,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -57,11 +59,14 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.waterrower.tracker.data.WorkoutEntity
 import com.waterrower.tracker.data.WorkoutExporter
 import com.waterrower.tracker.data.WorkoutSampleEntity
 import com.waterrower.tracker.model.RowingTelemetry
+import com.waterrower.tracker.model.Split500m
+import com.waterrower.tracker.model.WorkoutAnalytics
 import com.waterrower.tracker.service.RowingSessionHub
 import com.waterrower.tracker.ui.theme.LocalRowingColors
 import kotlinx.coroutines.launch
@@ -76,6 +81,7 @@ fun WorkoutDetailScreen(
     workoutId: String,
     hub: RowingSessionHub,
     onBack: () -> Unit,
+    onStartGhost: (String) -> Unit,
     onShowMessage: (String) -> Unit,
 ) {
     BackHandler(enabled = true, onBack = onBack)
@@ -207,6 +213,13 @@ fun WorkoutDetailScreen(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
+                        if (samples.size >= 2) {
+                            FilledTonalButton(onClick = { onStartGhost(current.id) }) {
+                                Icon(Icons.Rounded.Flag, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text("Als Ghost")
+                            }
+                        }
                         FilledTonalButton(
                             onClick = { triggerExport(asCsv = false) },
                             enabled = exportingFormat == null,
@@ -298,6 +311,17 @@ fun WorkoutDetailScreen(
                     }
                 }
 
+                val splits = remember(samples, current.totalDistanceMeters, current.durationSeconds) {
+                    WorkoutAnalytics.computeSplits500m(
+                        samples = samples,
+                        totalDistanceMeters = current.totalDistanceMeters,
+                        totalDurationSeconds = current.durationSeconds,
+                    )
+                }
+                if (splits.isNotEmpty()) {
+                    Splits500mCard(splits = splits)
+                }
+
                 if (samples.size >= 2) {
                     val endDurationLabel = RowingTelemetry.formatDuration(current.durationSeconds)
 
@@ -366,6 +390,119 @@ fun WorkoutDetailScreen(
                             },
                         )
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun Splits500mCard(splits: List<Split500m>) {
+    val colorScheme = MaterialTheme.colorScheme
+    val rowingColors = LocalRowingColors.current
+    val bestFullPace = remember(splits) {
+        splits.filter { !it.isPartial }.minOfOrNull { it.paceSecPer500m }
+    }
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = colorScheme.surfaceContainerLow),
+        shape = MaterialTheme.shapes.medium,
+        border = BorderStroke(1.dp, colorScheme.outlineVariant.copy(alpha = 0.45f)),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                text = "500m-Splits",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    text = "DISTANZ",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1.2f),
+                )
+                Text(
+                    text = "PACE",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.End,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    text = "Ø SPM",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.End,
+                    modifier = Modifier.weight(0.8f),
+                )
+                Text(
+                    text = "Ø WATT",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.End,
+                    modifier = Modifier.weight(0.8f),
+                )
+            }
+
+            HorizontalDivider(color = colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+            splits.forEachIndexed { idx, split ->
+                val isBest = !split.isPartial && bestFullPace != null && split.paceSecPer500m == bestFullPace
+                val label = if (split.isPartial) {
+                    "${RowingTelemetry.formatDistance(split.endMeters)} (${split.distanceMeters} m)"
+                } else {
+                    RowingTelemetry.formatDistance(split.endMeters)
+                }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        text = label,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = if (isBest) FontWeight.SemiBold else FontWeight.Normal,
+                        color = if (split.isPartial) colorScheme.onSurfaceVariant else colorScheme.onSurface,
+                        modifier = Modifier.weight(1.2f),
+                    )
+                    Text(
+                        text = RowingTelemetry.formatPace(split.paceSecPer500m),
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (isBest) rowingColors.active else rowingColors.pace,
+                        textAlign = TextAlign.End,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        text = if (split.avgStrokeRate > 0f) {
+                            String.format(Locale.US, "%.1f", split.avgStrokeRate)
+                        } else {
+                            "--"
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        textAlign = TextAlign.End,
+                        modifier = Modifier.weight(0.8f),
+                    )
+                    Text(
+                        text = if (split.avgWatts > 0) "${split.avgWatts} W" else "--",
+                        style = MaterialTheme.typography.bodyMedium,
+                        textAlign = TextAlign.End,
+                        modifier = Modifier.weight(0.8f),
+                    )
+                }
+                if (idx < splits.lastIndex) {
+                    HorizontalDivider(color = colorScheme.outlineVariant.copy(alpha = 0.25f))
                 }
             }
         }

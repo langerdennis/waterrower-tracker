@@ -9,6 +9,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.content.res.Configuration
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -23,7 +25,9 @@ import com.waterrower.tracker.R
 import com.waterrower.tracker.WaterRowerApp
 import com.waterrower.tracker.data.RecordingState
 import com.waterrower.tracker.model.ConnectionState
+import com.waterrower.tracker.model.GhostDelta
 import com.waterrower.tracker.model.RowingTelemetry
+import com.waterrower.tracker.model.WorkoutGoal
 import com.waterrower.tracker.overlay.FloatingOverlayController
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -41,6 +45,7 @@ class RowingForegroundService : LifecycleService() {
     private var isForeground = false
     private var idleStopJob: Job? = null
     private var lastStartId: Int = -1
+    private var completedGoalKey: String? = null
 
     private var lastNotificationText: String? = null
     private var lastNotificationStateKey: String? = null
@@ -71,14 +76,27 @@ class RowingForegroundService : LifecycleService() {
         )
 
         lifecycleScope.launch {
+            val goalAndGhost = combine(hub.activeGoal, hub.ghostDelta) { goal, ghost ->
+                goal to ghost
+            }
             combine(
                 hub.telemetry,
                 hub.connectionState,
                 hub.recordingState,
                 prefs.settings,
-                hub.isOverlayVisible,
-            ) { telemetry, conn, rec, settings, overlayVisible ->
-                OverlaySnapshot(telemetry, conn, rec, settings, overlayVisible)
+                combine(hub.isOverlayVisible, goalAndGhost) { visible, gg ->
+                    Triple(visible, gg.first, gg.second)
+                },
+            ) { telemetry, conn, rec, settings, extras ->
+                OverlaySnapshot(
+                    telemetry = telemetry,
+                    connection = conn,
+                    recording = rec,
+                    settings = settings,
+                    overlayVisible = extras.first,
+                    goal = extras.second,
+                    ghostDelta = extras.third,
+                )
             }.collect { snap ->
                 runOnMain {
                     overlayController?.update(
@@ -86,8 +104,11 @@ class RowingForegroundService : LifecycleService() {
                         connection = snap.connection,
                         recording = snap.recording,
                         settings = snap.settings,
+                        goal = snap.goal,
+                        ghostDelta = snap.ghostDelta,
                     )
                 }
+                checkGoalCompletionCue(snap)
                 updateNotification(snap)
                 updateIdleAutoStop(snap)
             }
@@ -341,7 +362,7 @@ class RowingForegroundService : LifecycleService() {
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_rowing_notification)
-            .setContentTitle("WaterRower Tracker")
+            .setContentTitle("WaterRower")
             .setContentText(contentText)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
@@ -351,12 +372,47 @@ class RowingForegroundService : LifecycleService() {
             .build()
     }
 
+    private fun checkGoalCompletionCue(snap: OverlaySnapshot) {
+        val rec = snap.recording as? RecordingState.Active ?: run {
+            completedGoalKey = null
+            return
+        }
+        val goal = snap.goal
+        if (!goal.hasProgressTarget) {
+            completedGoalKey = null
+            return
+        }
+        val goalKey = "${rec.workoutId}:${goal.distanceTargetMeters}:${goal.durationTargetSeconds}"
+        if (goal.isCompleted(rec.distanceMeters, rec.elapsedSeconds) && completedGoalKey != goalKey) {
+            completedGoalKey = goalKey
+            playGoalChime()
+            hub.emitUiMessage("Ziel erreicht! (${goal.shortSummary()})")
+        }
+    }
+
+    private fun playGoalChime() {
+        try {
+            val tg = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 75)
+            tg.startTone(ToneGenerator.TONE_PROP_ACK, 240)
+            mainHandler.postDelayed({
+                try {
+                    tg.release()
+                } catch (_: Exception) {
+                }
+            }, 350L)
+        } catch (e: Exception) {
+            Log.w(TAG, "Unable to play goal completion tone", e)
+        }
+    }
+
     private data class OverlaySnapshot(
         val telemetry: RowingTelemetry,
         val connection: ConnectionState,
         val recording: RecordingState,
         val settings: com.waterrower.tracker.data.OverlaySettings,
         val overlayVisible: Boolean,
+        val goal: WorkoutGoal,
+        val ghostDelta: GhostDelta?,
     )
 
     companion object {
