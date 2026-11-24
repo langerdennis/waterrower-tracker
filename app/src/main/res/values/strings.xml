@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">WaterRower Tracker</string>
+    <string name="notification_channel_name">Ruder-Tracking &amp; Overlay</string>
+    <string name="notification_channel_desc">Hält die Bluetooth-Verbindung zum WaterRower S4 im Hintergrund aktiv.</string>
+</resources>
