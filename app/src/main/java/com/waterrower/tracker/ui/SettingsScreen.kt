@@ -29,12 +29,17 @@ import androidx.compose.material.icons.rounded.BugReport
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.FileDownload
+import androidx.compose.material.icons.rounded.FileUpload
 import androidx.compose.material.icons.rounded.PictureInPictureAlt
 import androidx.compose.material.icons.rounded.PlayCircleOutline
 import androidx.compose.material.icons.rounded.RestartAlt
+import androidx.compose.material.icons.rounded.Storage
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -67,16 +72,23 @@ import java.util.Date
 import java.util.Locale
 import kotlin.math.roundToInt
 
+private val AUTO_FINISH_OPTIONS = listOf(0, 2, 3, 5)
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SettingsScreen(
     settings: OverlaySettings,
     diagnostics: BleDiagnostics,
+    workoutCount: Int,
+    isBackupBusy: Boolean,
     onOpacityChange: (Float) -> Unit,
     onScaleChange: (Float) -> Unit,
     onShowWattsInMiniChange: (Boolean) -> Unit,
     onAutoStartChange: (Boolean) -> Unit,
+    onAutoFinishMinutesChange: (Int) -> Unit,
     onResetOverlayPosition: () -> Unit,
+    onExportBackup: () -> Unit,
+    onImportBackup: () -> Unit,
     onShowMessage: (String) -> Unit,
 ) {
     val colorScheme = MaterialTheme.colorScheme
@@ -266,6 +278,34 @@ fun SettingsScreen(
                         onCheckedChange = onAutoStartChange,
                     )
 
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            text = "Automatisch beenden nach Leerlauf",
+                            style = MaterialTheme.typography.titleMedium,
+                        )
+                        Text(
+                            text = if (settings.autoFinishIdleMinutes == 0) {
+                                "Deaktiviert – laufende Aufnahmen werden manuell gespeichert."
+                            } else {
+                                "Speichert eine Aufnahme automatisch nach ${settings.autoFinishIdleMinutes} Min. Auto-Pause."
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colorScheme.onSurfaceVariant,
+                        )
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            AUTO_FINISH_OPTIONS.forEach { mins ->
+                                FilterChip(
+                                    selected = settings.autoFinishIdleMinutes == mins,
+                                    onClick = { onAutoFinishMinutesChange(mins) },
+                                    label = { Text(if (mins == 0) "Aus" else "$mins Min") },
+                                )
+                            }
+                        }
+                    }
+
                     HorizontalDivider(color = colorScheme.outlineVariant.copy(alpha = 0.5f))
 
                     FlowRow(
@@ -300,7 +340,80 @@ fun SettingsScreen(
                 }
             }
 
-            // 2. Collapsible BLE Diagnostics for S4 Comms 61
+            // 2. Local Full JSON Backup & Restore
+            Card(
+                colors = CardDefaults.cardColors(containerColor = colorScheme.surfaceContainerLow),
+                shape = MaterialTheme.shapes.medium,
+                border = BorderStroke(1.dp, colorScheme.outlineVariant.copy(alpha = 0.45f)),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(
+                    modifier = Modifier.padding(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Storage,
+                            contentDescription = null,
+                            tint = colorScheme.primary,
+                        )
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(
+                                text = "Lokale Datensicherung",
+                                style = MaterialTheme.typography.titleLarge,
+                            )
+                            Text(
+                                text = "$workoutCount gespeicherte Einheiten • Duplikatfreier JSON-Import per UUID",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        FilledTonalButton(
+                            onClick = onExportBackup,
+                            enabled = !isBackupBusy && workoutCount > 0,
+                        ) {
+                            if (isBackupBusy) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp,
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Rounded.FileDownload,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp),
+                                )
+                            }
+                            Spacer(Modifier.width(8.dp))
+                            Text("Backup speichern (JSON)")
+                        }
+
+                        OutlinedButton(
+                            onClick = onImportBackup,
+                            enabled = !isBackupBusy,
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.FileUpload,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text("Backup wiederherstellen")
+                        }
+                    }
+                }
+            }
+
+            // 3. Collapsible BLE Diagnostics for S4 Comms 61
             Card(
                 colors = CardDefaults.cardColors(containerColor = colorScheme.surfaceContainerLow),
                 shape = MaterialTheme.shapes.medium,

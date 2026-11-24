@@ -249,20 +249,18 @@ fun WorkoutDetailScreen(
             }
 
             if (current != null) {
-                val summaryItems = listOf(
-                    Triple("DISTANZ", RowingTelemetry.formatDistance(current.totalDistanceMeters), rowingColors.distance),
-                    Triple("DAUER", RowingTelemetry.formatDuration(current.durationSeconds), colorScheme.onSurface),
-                    Triple("Ø PACE", "${RowingTelemetry.formatPace(current.avgPaceSecPer500m)} /500m", rowingColors.pace),
-                    Triple("Ø SPM", String.format(Locale.US, "%.1f", current.avgStrokeRate), colorScheme.onSurface),
-                    Triple("Ø WATT", "${current.avgWatts} W", colorScheme.onSurface),
-                    Triple("KALORIEN", "${current.totalCalories} kcal", colorScheme.onSurface),
-                    Triple("SCHLÄGE", "${current.totalStrokes}", colorScheme.onSurface),
-                    Triple(
-                        "Ø PULS",
-                        current.avgHeartRateBpm?.let { "$it bpm" } ?: "--",
-                        if (current.avgHeartRateBpm != null) rowingColors.heartRate else colorScheme.onSurfaceVariant,
-                    ),
-                )
+                val summaryItems = buildList {
+                    add(Triple("DISTANZ", RowingTelemetry.formatDistance(current.totalDistanceMeters), rowingColors.distance))
+                    add(Triple("DAUER", RowingTelemetry.formatDuration(current.durationSeconds), colorScheme.onSurface))
+                    add(Triple("Ø PACE", "${RowingTelemetry.formatPace(current.avgPaceSecPer500m)} /500m", rowingColors.pace))
+                    add(Triple("Ø SPM", String.format(Locale.US, "%.1f", current.avgStrokeRate), colorScheme.onSurface))
+                    add(Triple("Ø WATT", "${current.avgWatts} W", colorScheme.onSurface))
+                    add(Triple("KALORIEN", "${current.totalCalories} kcal", colorScheme.onSurface))
+                    add(Triple("SCHLÄGE", "${current.totalStrokes}", colorScheme.onSurface))
+                    current.avgHeartRateBpm?.let { hr ->
+                        add(Triple("Ø PULS", "$hr bpm", rowingColors.heartRate))
+                    }
+                }
 
                 // Responsive Summary Metrics Card (4 cols >= 640dp, 2 cols < 640dp)
                 Card(

@@ -66,7 +66,9 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
 import com.waterrower.tracker.data.RecordingState
+import com.waterrower.tracker.data.WorkoutExporter
 import com.waterrower.tracker.service.RowingForegroundService
 import com.waterrower.tracker.ui.DashboardScreen
 import com.waterrower.tracker.ui.HistoryScreen
@@ -92,6 +94,21 @@ class MainActivity : ComponentActivity() {
     private var pendingAfterPermissions: (() -> Unit)? = null
     private var hasRequestedNotificationPermission = false
     private var permissionDialogState by mutableStateOf<BlePermissionDialogState?>(null)
+    private var isBackupBusy by mutableStateOf(false)
+
+    private val exportBackupLauncher = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json"),
+    ) { uri ->
+        if (uri == null) return@registerForActivityResult
+        performBackupExport(uri)
+    }
+
+    private val importBackupLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri == null) return@registerForActivityResult
+        performBackupImport(uri)
+    }
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
@@ -160,6 +177,7 @@ class MainActivity : ComponentActivity() {
                 WaterRowerRoot(
                     activity = this,
                     permissionDialogState = permissionDialogState,
+                    isBackupBusy = isBackupBusy,
                     onDismissPermissionDialog = {
                         pendingAfterPermissions = null
                         permissionDialogState = null
@@ -178,6 +196,8 @@ class MainActivity : ComponentActivity() {
                     onReconnectSimulator = { startOrReconnectSimulator(reconnect = true) },
                     onToggleOverlay = { handleToggleOverlay() },
                     onResetOverlayPosition = { handleResetOverlayPosition() },
+                    onExportBackup = { handleLaunchBackupExport() },
+                    onImportBackup = { handleLaunchBackupImport() },
                 )
             }
         }
@@ -186,6 +206,79 @@ class MainActivity : ComponentActivity() {
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         outState.putBoolean(KEY_REQUESTED_NOTIFICATION_PERMISSION, hasRequestedNotificationPermission)
+    }
+
+    private fun handleLaunchBackupExport() {
+        if (isBackupBusy) return
+        exportBackupLauncher.launch(WorkoutExporter.defaultBackupFilename())
+    }
+
+    private fun handleLaunchBackupImport() {
+        if (isBackupBusy) return
+        importBackupLauncher.launch(arrayOf("application/json", "text/plain", "*/*"))
+    }
+
+    private fun performBackupExport(uri: Uri) {
+        if (isBackupBusy) return
+        isBackupBusy = true
+        lifecycleScope.launch {
+            try {
+                val items = app.sessionHub.getAllWorkoutsForBackup()
+                val result = WorkoutExporter.writeBackupToUri(this@MainActivity, uri, items)
+                result.onSuccess { count ->
+                    app.sessionHub.emitUiMessage(
+                        if (count == 1) {
+                            "Backup gespeichert (1 Workout)."
+                        } else {
+                            "Backup gespeichert ($count Workouts)."
+                        },
+                    )
+                }.onFailure { err ->
+                    app.sessionHub.emitUiMessage(
+                        "Backup fehlgeschlagen: ${err.localizedMessage ?: "Unbekannter Fehler"}",
+                    )
+                }
+            } finally {
+                isBackupBusy = false
+            }
+        }
+    }
+
+    private fun performBackupImport(uri: Uri) {
+        if (isBackupBusy) return
+        isBackupBusy = true
+        lifecycleScope.launch {
+            try {
+                val parsed = WorkoutExporter.readBackupFromUri(this@MainActivity, uri)
+                parsed.onSuccess { items ->
+                    if (items.isEmpty()) {
+                        app.sessionHub.emitUiMessage("Die gewählte Backup-Datei enthält keine Workouts.")
+                    } else {
+                        val summary = app.sessionHub.importWorkouts(items)
+                        val msg = buildString {
+                            append(
+                                if (summary.importedCount == 1) {
+                                    "1 Workout wiederhergestellt"
+                                } else {
+                                    "${summary.importedCount} Workouts wiederhergestellt"
+                                },
+                            )
+                            if (summary.skippedDuplicates > 0) {
+                                append(" (${summary.skippedDuplicates} bereits vorhanden)")
+                            }
+                            append(".")
+                        }
+                        app.sessionHub.emitUiMessage(msg)
+                    }
+                }.onFailure { err ->
+                    app.sessionHub.emitUiMessage(
+                        "Import fehlgeschlagen: ${err.localizedMessage ?: "Ungültige Backup-Datei"}",
+                    )
+                }
+            } finally {
+                isBackupBusy = false
+            }
+        }
     }
 
     private fun coreBlePermissions(): Array<String> {
@@ -301,6 +394,7 @@ class MainActivity : ComponentActivity() {
 private fun WaterRowerRoot(
     activity: MainActivity,
     permissionDialogState: BlePermissionDialogState?,
+    isBackupBusy: Boolean,
     onDismissPermissionDialog: () -> Unit,
     onRetryBlePermissions: () -> Unit,
     onOpenAppSettings: () -> Unit,
@@ -309,6 +403,8 @@ private fun WaterRowerRoot(
     onReconnectSimulator: () -> Unit,
     onToggleOverlay: () -> Unit,
     onResetOverlayPosition: () -> Unit,
+    onExportBackup: () -> Unit,
+    onImportBackup: () -> Unit,
 ) {
     val app = activity.application as WaterRowerApp
     val hub = app.sessionHub
@@ -482,6 +578,7 @@ private fun WaterRowerRoot(
                                 recordingState = recordingState,
                                 isOverlayVisible = isOverlayVisible,
                                 isSimulatorMode = isSimulatorMode,
+                                isBackupBusy = isBackupBusy,
                                 settings = settings,
                                 workouts = workouts,
                                 activity = activity,
@@ -490,6 +587,8 @@ private fun WaterRowerRoot(
                                 onReconnectSimulator = onReconnectSimulator,
                                 onToggleOverlay = onToggleOverlay,
                                 onResetOverlayPosition = onResetOverlayPosition,
+                                onExportBackup = onExportBackup,
+                                onImportBackup = onImportBackup,
                                 onShowMessage = showMessage,
                             )
                         }
@@ -537,6 +636,7 @@ private fun WaterRowerRoot(
                             recordingState = recordingState,
                             isOverlayVisible = isOverlayVisible,
                             isSimulatorMode = isSimulatorMode,
+                            isBackupBusy = isBackupBusy,
                             settings = settings,
                             workouts = workouts,
                             activity = activity,
@@ -545,6 +645,8 @@ private fun WaterRowerRoot(
                             onReconnectSimulator = onReconnectSimulator,
                             onToggleOverlay = onToggleOverlay,
                             onResetOverlayPosition = onResetOverlayPosition,
+                            onExportBackup = onExportBackup,
+                            onImportBackup = onImportBackup,
                             onShowMessage = showMessage,
                         )
                     }
@@ -568,6 +670,7 @@ private fun TabContent(
     recordingState: RecordingState,
     isOverlayVisible: Boolean,
     isSimulatorMode: Boolean,
+    isBackupBusy: Boolean,
     settings: com.waterrower.tracker.data.OverlaySettings,
     workouts: List<com.waterrower.tracker.data.WorkoutEntity>,
     activity: MainActivity,
@@ -576,6 +679,8 @@ private fun TabContent(
     onReconnectSimulator: () -> Unit,
     onToggleOverlay: () -> Unit,
     onResetOverlayPosition: () -> Unit,
+    onExportBackup: () -> Unit,
+    onImportBackup: () -> Unit,
     onShowMessage: (String) -> Unit,
 ) {
     val app = activity.application as WaterRowerApp
@@ -637,11 +742,16 @@ private fun TabContent(
         AppTab.SETTINGS -> SettingsScreen(
             settings = settings,
             diagnostics = diagnostics,
+            workoutCount = workouts.size,
+            isBackupBusy = isBackupBusy,
             onOpacityChange = { prefs.setOpacity(it) },
             onScaleChange = { prefs.setScale(it) },
             onShowWattsInMiniChange = { prefs.setShowWattsInMini(it) },
             onAutoStartChange = { prefs.setAutoStartRecording(it) },
+            onAutoFinishMinutesChange = { prefs.setAutoFinishIdleMinutes(it) },
             onResetOverlayPosition = onResetOverlayPosition,
+            onExportBackup = onExportBackup,
+            onImportBackup = onImportBackup,
             onShowMessage = onShowMessage,
         )
     }

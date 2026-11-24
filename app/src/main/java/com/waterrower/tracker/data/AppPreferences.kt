@@ -10,6 +10,7 @@ data class OverlaySettings(
     val scale: Float = 1.0f,
     val showWattsInMini: Boolean = false,
     val autoStartRecording: Boolean = true,
+    val autoFinishIdleMinutes: Int = AppPreferences.DEFAULT_AUTO_FINISH_MINUTES,
     val lastDeviceAddress: String? = null,
     val lastDeviceName: String? = null,
     val overlayX: Int = AppPreferences.DEFAULT_OVERLAY_X,
@@ -27,6 +28,7 @@ class AppPreferences(context: Context) {
         scale = prefs.getFloat(KEY_SCALE, 1.0f).coerceIn(0.8f, 1.4f),
         showWattsInMini = prefs.getBoolean(KEY_SHOW_WATTS, false),
         autoStartRecording = prefs.getBoolean(KEY_AUTO_RECORD, true),
+        autoFinishIdleMinutes = prefs.getInt(KEY_AUTO_FINISH_MIN, DEFAULT_AUTO_FINISH_MINUTES).coerceIn(0, 30),
         lastDeviceAddress = prefs.getString(KEY_LAST_ADDR, null),
         lastDeviceName = prefs.getString(KEY_LAST_NAME, null),
         overlayX = prefs.getInt(KEY_OVERLAY_X, DEFAULT_OVERLAY_X),
@@ -55,6 +57,12 @@ class AppPreferences(context: Context) {
         _settings.value = _settings.value.copy(autoStartRecording = enabled)
     }
 
+    fun setAutoFinishIdleMinutes(minutes: Int) {
+        val clamped = minutes.coerceIn(0, 30)
+        prefs.edit().putInt(KEY_AUTO_FINISH_MIN, clamped).apply()
+        _settings.value = _settings.value.copy(autoFinishIdleMinutes = clamped)
+    }
+
     fun saveLastDevice(address: String, name: String) {
         prefs.edit()
             .putString(KEY_LAST_ADDR, address)
@@ -81,11 +89,13 @@ class AppPreferences(context: Context) {
     companion object {
         const val DEFAULT_OVERLAY_X = 36
         const val DEFAULT_OVERLAY_Y = 36
+        const val DEFAULT_AUTO_FINISH_MINUTES = 3
 
         private const val KEY_OPACITY = "overlay_opacity"
         private const val KEY_SCALE = "overlay_scale"
         private const val KEY_SHOW_WATTS = "overlay_show_watts"
         private const val KEY_AUTO_RECORD = "auto_start_recording"
+        private const val KEY_AUTO_FINISH_MIN = "auto_finish_idle_minutes"
         private const val KEY_LAST_ADDR = "last_device_address"
         private const val KEY_LAST_NAME = "last_device_name"
         private const val KEY_OVERLAY_X = "overlay_x"

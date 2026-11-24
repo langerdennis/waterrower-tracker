@@ -111,4 +111,51 @@ class WorkoutExporterTest {
         assertFalse(csv.contains("NaN"))
         assertFalse(csv.contains("Infinity"))
     }
+
+    @Test
+    fun buildAndParseBackupJson_roundTripsMultipleWorkoutsAndSamples() {
+        val secondWorkout = sampleWorkout.copy(
+            id = "wk-002-\"quoted\"",
+            startedAtEpochMs = 1_700_010_000_000L,
+            endedAtEpochMs = 1_700_010_300_000L,
+            durationSeconds = 300,
+            totalDistanceMeters = 1200,
+            avgHeartRateBpm = null,
+            isSimulated = true,
+        )
+        val input = listOf(
+            RecordedWorkout(sampleWorkout, samples),
+            RecordedWorkout(secondWorkout, emptyList()),
+        )
+
+        val backupJson = WorkoutExporter.buildBackupJson(input, exportedAtEpochMs = 1_700_020_000_000L)
+        val parsed = WorkoutExporter.parseBackupJson(backupJson).getOrThrow()
+
+        assertEquals(2, parsed.size)
+        assertEquals(sampleWorkout, parsed[0].workout)
+        assertEquals(2, parsed[0].samples.size)
+        assertEquals(138, parsed[0].samples[0].heartRateBpm)
+        assertEquals(null, parsed[0].samples[1].heartRateBpm)
+        assertEquals(0L, parsed[0].samples[0].sampleId)
+
+        assertEquals(secondWorkout, parsed[1].workout)
+        assertTrue(parsed[1].samples.isEmpty())
+    }
+
+    @Test
+    fun parseBackupJson_alsoAcceptsSingleWorkoutExport() {
+        val singleJson = WorkoutExporter.buildJson(sampleWorkout, samples)
+        val parsed = WorkoutExporter.parseBackupJson(singleJson).getOrThrow()
+
+        assertEquals(1, parsed.size)
+        assertEquals("wk-001", parsed[0].workout.id)
+        assertEquals(2, parsed[0].samples.size)
+    }
+
+    @Test
+    fun parseBackupJson_rejectsMalformedOrUnrelatedJson() {
+        assertTrue(WorkoutExporter.parseBackupJson("{not valid json").isFailure)
+        assertTrue(WorkoutExporter.parseBackupJson("{\"hello\":\"world\"}").isFailure)
+        assertTrue(WorkoutExporter.parseBackupJson("[]").isFailure)
+    }
 }

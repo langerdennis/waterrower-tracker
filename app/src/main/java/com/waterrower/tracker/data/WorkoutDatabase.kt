@@ -28,12 +28,40 @@ interface WorkoutDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertSamples(samples: List<WorkoutSampleEntity>)
 
+    @Query("SELECT * FROM workouts ORDER BY startedAtEpochMs DESC")
+    suspend fun getAllWorkoutsOnce(): List<WorkoutEntity>
+
+    @Query("SELECT * FROM workout_samples ORDER BY workoutId ASC, offsetSeconds ASC")
+    suspend fun getAllSamplesOnce(): List<WorkoutSampleEntity>
+
+    @Query("SELECT id FROM workouts")
+    suspend fun getAllWorkoutIds(): List<String>
+
     @Transaction
     suspend fun saveWorkoutWithSamples(workout: WorkoutEntity, samples: List<WorkoutSampleEntity>) {
         insertWorkout(workout)
         if (samples.isNotEmpty()) {
             insertSamples(samples)
         }
+    }
+
+    @Transaction
+    suspend fun importNewWorkouts(items: List<RecordedWorkout>): Int {
+        if (items.isEmpty()) return 0
+        val existingIds = getAllWorkoutIds().toHashSet()
+        var imported = 0
+        for (item in items) {
+            if (item.workout.id.isBlank() || !existingIds.add(item.workout.id)) continue
+            insertWorkout(item.workout)
+            if (item.samples.isNotEmpty()) {
+                val cleanSamples = item.samples.map { sample ->
+                    sample.copy(sampleId = 0L, workoutId = item.workout.id)
+                }
+                insertSamples(cleanSamples)
+            }
+            imported += 1
+        }
+        return imported
     }
 
     @Query("DELETE FROM workouts WHERE id = :workoutId")

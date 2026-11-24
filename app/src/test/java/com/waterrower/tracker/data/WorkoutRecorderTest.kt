@@ -786,4 +786,99 @@ class WorkoutRecorderTest {
         )
         assertTrue(staticAt15 is RecordingState.Idle)
     }
+
+    @Test
+    fun checkIdleAutoFinish_finalizesWorkoutEvenWhenBleGoesSilent() {
+        val recorder = WorkoutRecorder(autoPauseTimeoutMs = 15_000L)
+        val t0 = 1_700_000_000_000L
+        recorder.start(nowMs = t0)
+
+        for (sec in 1..10) {
+            recorder.onTelemetry(
+                RowingTelemetry(
+                    timestampMs = t0 + sec * 1_000L,
+                    distanceMeters = sec * 5,
+                    strokeCount = sec,
+                    strokeRateSpm = 24f,
+                    watts = 160,
+                ),
+                autoStart = false,
+                isSimulated = false,
+                nowMs = t0 + sec * 1_000L,
+            )
+        }
+
+        // BLE stops sending at +10s; at +25s watchdog transitions to auto-pause
+        val pausedCheck = recorder.checkIdleAutoFinish(
+            nowMs = t0 + 25_000L,
+            autoFinishTimeoutMs = 180_000L,
+        )
+        assertFalse(pausedCheck.didAutoFinish)
+        val activeState = pausedCheck.state as RecordingState.Active
+        assertTrue(activeState.isPaused)
+        assertTrue(activeState.isAutoPaused)
+
+        // Before 180s elapsed since auto-pause -> still paused
+        val midCheck = recorder.checkIdleAutoFinish(
+            nowMs = t0 + 200_000L,
+            autoFinishTimeoutMs = 180_000L,
+        )
+        assertFalse(midCheck.didAutoFinish)
+        assertTrue(midCheck.state is RecordingState.Active)
+
+        // At +205s (180s after auto-pause at +25s) -> auto-finishes and saves workout
+        val finishCheck = recorder.checkIdleAutoFinish(
+            nowMs = t0 + 205_000L,
+            autoFinishTimeoutMs = 180_000L,
+        )
+        assertTrue(finishCheck.didAutoFinish)
+        assertTrue(finishCheck.state is RecordingState.Idle)
+        val saved = finishCheck.autoFinishedWorkout
+        assertNotNull(saved)
+        assertEquals(50, saved!!.workout.totalDistanceMeters)
+        assertEquals(10, saved.workout.durationSeconds)
+        assertEquals(t0 + 25_000L, saved.workout.endedAtEpochMs)
+    }
+
+    @Test
+    fun checkIdleAutoFinish_neverAutoFinishesManualPauseOrDisabledTimeout() {
+        val recorder = WorkoutRecorder(autoPauseTimeoutMs = 15_000L)
+        val t0 = 1_700_000_000_000L
+        recorder.start(nowMs = t0)
+        for (sec in 1..6) {
+            recorder.onTelemetry(
+                RowingTelemetry(
+                    timestampMs = t0 + sec * 1_000L,
+                    distanceMeters = sec * 5,
+                    strokeCount = sec,
+                    strokeRateSpm = 24f,
+                    watts = 160,
+                ),
+                autoStart = false,
+                isSimulated = false,
+                nowMs = t0 + sec * 1_000L,
+            )
+        }
+
+        // Manual pause must never auto-finish even after an hour
+        recorder.togglePause(nowMs = t0 + 7_000L)
+        val manualCheck = recorder.checkIdleAutoFinish(
+            nowMs = t0 + 3_600_000L,
+            autoFinishTimeoutMs = 60_000L,
+        )
+        assertFalse(manualCheck.didAutoFinish)
+        assertNull(manualCheck.autoFinishedWorkout)
+        assertTrue((manualCheck.state as RecordingState.Active).isPaused)
+        assertFalse((manualCheck.state as RecordingState.Active).isAutoPaused)
+
+        // Resume, then go silent with autoFinishTimeoutMs = 0 (disabled) -> auto-pauses but never finishes
+        recorder.togglePause(nowMs = t0 + 3_601_000L)
+        val disabledCheck = recorder.checkIdleAutoFinish(
+            nowMs = t0 + 7_200_000L,
+            autoFinishTimeoutMs = 0L,
+        )
+        assertFalse(disabledCheck.didAutoFinish)
+        assertNull(disabledCheck.autoFinishedWorkout)
+        assertTrue((disabledCheck.state as RecordingState.Active).isAutoPaused)
+    }
 }

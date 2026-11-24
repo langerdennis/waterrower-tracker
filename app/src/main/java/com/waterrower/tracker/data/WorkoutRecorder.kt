@@ -24,10 +24,16 @@ data class RecordedWorkout(
     val samples: List<WorkoutSampleEntity>,
 )
 
+data class IdleCheckResult(
+    val state: RecordingState,
+    val autoFinishedWorkout: RecordedWorkout? = null,
+    val didAutoFinish: Boolean = false,
+)
+
 /**
  * Stateful workout session recorder with real-movement auto-start, manual-stop cooldown,
- * auto-pause/auto-resume, drift-free millisecond timing, S4 mid-session reset preservation,
- * and 1Hz sample capture. Thread-safe and pure Kotlin for JVM unit testing.
+ * auto-pause/auto-resume, idle auto-finish, drift-free millisecond timing, S4 mid-session
+ * reset preservation, and 1Hz sample capture. Thread-safe and pure Kotlin for JVM unit testing.
  */
 class WorkoutRecorder(
     private val manualStopCooldownMs: Long = DEFAULT_MANUAL_STOP_COOLDOWN_MS,
@@ -39,6 +45,7 @@ class WorkoutRecorder(
     private var startedAtMs: Long = 0L
     private var lastActiveClockMs: Long = 0L
     private var lastActiveTimestampMs: Long = 0L
+    private var autoPausedAtMs: Long = 0L
     private var isPaused: Boolean = false
     private var isAutoPaused: Boolean = false
     private var isSimulatedSession: Boolean = false
@@ -100,6 +107,7 @@ class WorkoutRecorder(
         } else {
             isPaused = true
             isAutoPaused = false
+            autoPausedAtMs = 0L
             lastPausedRawDistance = lastRawDistance
             lastPausedRawStrokes = lastRawStrokes
             lastPausedRawCalories = lastRawCalories
@@ -223,6 +231,7 @@ class WorkoutRecorder(
         } else if (autoPauseTimeoutMs > 0L && nowMs - lastActiveTimestampMs >= autoPauseTimeoutMs) {
             isPaused = true
             isAutoPaused = true
+            autoPausedAtMs = nowMs
             lastPausedRawDistance = telemetry.distanceMeters
             lastPausedRawStrokes = telemetry.strokeCount
             lastPausedRawCalories = telemetry.calories
@@ -301,10 +310,55 @@ class WorkoutRecorder(
     }
 
     /**
+     * Periodic wall-clock check so auto-pause and idle auto-finish still fire even if the S4
+     * ComModule sleeps or stops transmitting BLE packets. Manual pauses are never auto-finished.
+     */
+    fun checkIdleAutoFinish(
+        nowMs: Long = System.currentTimeMillis(),
+        autoFinishTimeoutMs: Long,
+    ): IdleCheckResult = synchronized(lock) {
+        val id = workoutId ?: return IdleCheckResult(state = state)
+
+        if (!isPaused && autoPauseTimeoutMs > 0L && nowMs - lastActiveTimestampMs >= autoPauseTimeoutMs) {
+            isPaused = true
+            isAutoPaused = true
+            autoPausedAtMs = (lastActiveTimestampMs + autoPauseTimeoutMs).coerceAtMost(nowMs)
+            lastPausedRawDistance = lastRawDistance
+            lastPausedRawStrokes = lastRawStrokes
+            lastPausedRawCalories = lastRawCalories
+            state = buildActiveStateLocked(id)
+        }
+
+        if (
+            isPaused &&
+            isAutoPaused &&
+            autoFinishTimeoutMs > 0L &&
+            autoPausedAtMs > 0L &&
+            nowMs - autoPausedAtMs >= autoFinishTimeoutMs
+        ) {
+            val recorded = stopLocked(
+                endedAtMs = autoPausedAtMs,
+                cooldownAnchorMs = nowMs,
+            )
+            return IdleCheckResult(
+                state = state,
+                autoFinishedWorkout = recorded,
+                didAutoFinish = true,
+            )
+        }
+
+        IdleCheckResult(state = state)
+    }
+
+    /**
      * Stops the current workout and returns the finalized [RecordedWorkout],
      * or null if no meaningful activity was recorded.
      */
     fun stop(nowMs: Long = System.currentTimeMillis()): RecordedWorkout? = synchronized(lock) {
+        stopLocked(endedAtMs = nowMs, cooldownAnchorMs = nowMs)
+    }
+
+    private fun stopLocked(endedAtMs: Long, cooldownAnchorMs: Long): RecordedWorkout? {
         val id = workoutId ?: return null
         val distance = currentDistanceDeltaLocked()
         val duration = currentElapsedSecondsLocked()
@@ -330,7 +384,7 @@ class WorkoutRecorder(
                 workout = WorkoutEntity(
                     id = id,
                     startedAtEpochMs = startedAtMs,
-                    endedAtEpochMs = nowMs.coerceAtLeast(startedAtMs),
+                    endedAtEpochMs = endedAtMs.coerceAtLeast(startedAtMs),
                     durationSeconds = duration,
                     totalDistanceMeters = distance,
                     avgPaceSecPer500m = avgPace,
@@ -349,13 +403,13 @@ class WorkoutRecorder(
         }
 
         resetInternalLocked()
-        manualStopCooldownUntilMs = nowMs + manualStopCooldownMs
+        manualStopCooldownUntilMs = cooldownAnchorMs + manualStopCooldownMs
         idleBaselineDistance = if (hadTelemetry) stopRawDist else null
         idleBaselineStrokes = if (hadTelemetry) stopRawStrokes else null
         idleBaselineCalories = if (hadTelemetry) stopRawCalories else null
-        lastIdleTimestampMs = if (hadTelemetry) nowMs else 0L
+        lastIdleTimestampMs = if (hadTelemetry) cooldownAnchorMs else 0L
         state = RecordingState.Idle
-        result
+        return result
     }
 
     private fun startLocked(
@@ -370,6 +424,7 @@ class WorkoutRecorder(
         startedAtMs = nowMs
         lastActiveClockMs = clockAnchorMs
         lastActiveTimestampMs = nowMs
+        autoPausedAtMs = 0L
         isPaused = false
         isAutoPaused = false
         isSimulatedSession = isSimulated
@@ -402,6 +457,7 @@ class WorkoutRecorder(
         }
         isPaused = false
         isAutoPaused = false
+        autoPausedAtMs = 0L
         lastActiveTimestampMs = nowMs
         lastActiveClockMs = nowMs
     }
@@ -435,6 +491,7 @@ class WorkoutRecorder(
         startedAtMs = 0L
         lastActiveClockMs = 0L
         lastActiveTimestampMs = 0L
+        autoPausedAtMs = 0L
         isPaused = false
         isAutoPaused = false
         isSimulatedSession = false

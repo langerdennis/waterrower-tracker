@@ -5,6 +5,7 @@ import com.waterrower.tracker.ble.BleRowerClient
 import com.waterrower.tracker.ble.RowerClient
 import com.waterrower.tracker.ble.SimulatedRowerClient
 import com.waterrower.tracker.data.AppPreferences
+import com.waterrower.tracker.data.RecordedWorkout
 import com.waterrower.tracker.data.RecordingState
 import com.waterrower.tracker.data.WorkoutDatabase
 import com.waterrower.tracker.data.WorkoutEntity
@@ -18,6 +19,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -28,7 +30,13 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+
+data class BackupImportSummary(
+    val importedCount: Int,
+    val skippedDuplicates: Int,
+)
 
 /**
  * Single source of truth shared between the Compose UI and [RowingForegroundService].
@@ -109,6 +117,32 @@ class RowingSessionHub(
                             isSimulated = _isSimulatorMode.value,
                         )
                         _recordingState.value = updated
+                    }
+                }
+            }
+        }
+        // Periodic wall-clock watchdog for auto-pause & idle auto-finish even if BLE goes silent
+        scope.launch {
+            while (isActive) {
+                delay(IDLE_WATCHDOG_INTERVAL_MS)
+                if (_recordingState.value !is RecordingState.Active) continue
+                val timeoutMinutes = preferences.settings.value.autoFinishIdleMinutes
+                val timeoutMs = timeoutMinutes * 60_000L
+                val result = synchronized(recorderLock) {
+                    val check = recorder.checkIdleAutoFinish(autoFinishTimeoutMs = timeoutMs)
+                    _recordingState.value = check.state
+                    check
+                }
+                if (result.didAutoFinish) {
+                    val recorded = result.autoFinishedWorkout
+                    if (recorded != null) {
+                        database.workoutDao().saveWorkoutWithSamples(recorded.workout, recorded.samples)
+                        _lastSavedWorkoutId.value = recorded.workout.id
+                        emitUiMessage(
+                            "Workout nach Leerlauf automatisch gespeichert (${RowingTelemetry.formatDistance(recorded.workout.totalDistanceMeters)}).",
+                        )
+                    } else {
+                        emitUiMessage("Leere Aufnahme nach Leerlauf beendet.")
                     }
                 }
             }
@@ -226,9 +260,31 @@ class RowingSessionHub(
     suspend fun getWorkoutSamples(workoutId: String): List<WorkoutSampleEntity> =
         database.workoutDao().getSamplesForWorkout(workoutId)
 
+    suspend fun getAllWorkoutsForBackup(): List<RecordedWorkout> {
+        val dao = database.workoutDao()
+        val allWorkouts = dao.getAllWorkoutsOnce()
+        val samplesByWorkout = dao.getAllSamplesOnce().groupBy { it.workoutId }
+        return allWorkouts.map { w ->
+            RecordedWorkout(
+                workout = w,
+                samples = samplesByWorkout[w.id].orEmpty(),
+            )
+        }
+    }
+
+    suspend fun importWorkouts(items: List<RecordedWorkout>): BackupImportSummary {
+        val imported = database.workoutDao().importNewWorkouts(items)
+        val skipped = (items.size - imported).coerceAtLeast(0)
+        return BackupImportSummary(importedCount = imported, skippedDuplicates = skipped)
+    }
+
     fun deleteWorkout(workoutId: String) {
         scope.launch {
             database.workoutDao().deleteWorkout(workoutId)
         }
+    }
+
+    companion object {
+        private const val IDLE_WATCHDOG_INTERVAL_MS = 5_000L
     }
 }

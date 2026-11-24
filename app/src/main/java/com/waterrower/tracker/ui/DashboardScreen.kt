@@ -234,6 +234,8 @@ fun DashboardScreen(
         }
         val spmFormatted = String.format(Locale.US, "%.1f", telemetry.strokeRateSpm)
 
+        val hasHeartRate = telemetry.heartRateBpm != null
+
         BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
             val isWide = maxWidth >= 680.dp
             val isCompactHero = maxWidth < 420.dp
@@ -290,13 +292,15 @@ fun DashboardScreen(
                             modifier = Modifier.weight(1f),
                         )
                         MetricCard("SCHLÄGE", "$displayStrokes", Icons.Rounded.Repeat, modifier = Modifier.weight(1f))
-                        MetricCard(
-                            label = "HERZFREQUENZ",
-                            value = telemetry.heartRateBpm?.let { "$it bpm" } ?: "--",
-                            icon = Icons.Rounded.Favorite,
-                            accent = if (telemetry.heartRateBpm != null) rowingColors.heartRate else colorScheme.onSurfaceVariant,
-                            modifier = Modifier.weight(1f),
-                        )
+                        if (hasHeartRate) {
+                            MetricCard(
+                                label = "HERZFREQUENZ",
+                                value = "${telemetry.heartRateBpm} bpm",
+                                icon = Icons.Rounded.Favorite,
+                                accent = rowingColors.heartRate,
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
                     }
                 } else {
                     Row(
@@ -323,13 +327,15 @@ fun DashboardScreen(
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
                         MetricCard("SCHLÄGE", "$displayStrokes", Icons.Rounded.Repeat, modifier = Modifier.weight(1f))
-                        MetricCard(
-                            label = "HERZFREQUENZ",
-                            value = telemetry.heartRateBpm?.let { "$it bpm" } ?: "--",
-                            icon = Icons.Rounded.Favorite,
-                            accent = if (telemetry.heartRateBpm != null) rowingColors.heartRate else colorScheme.onSurfaceVariant,
-                            modifier = Modifier.weight(1f),
-                        )
+                        if (hasHeartRate) {
+                            MetricCard(
+                                label = "HERZFREQUENZ",
+                                value = "${telemetry.heartRateBpm} bpm",
+                                icon = Icons.Rounded.Favorite,
+                                accent = rowingColors.heartRate,
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
                     }
                 }
             }

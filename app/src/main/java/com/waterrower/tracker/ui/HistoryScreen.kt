@@ -25,12 +25,18 @@ import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Rowing
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -45,6 +51,12 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+private enum class HistoryFilter(val label: String) {
+    REAL("Echt"),
+    SIMULATED("Simulator"),
+    ALL("Alle"),
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun HistoryScreen(
@@ -55,8 +67,26 @@ fun HistoryScreen(
     val colorScheme = MaterialTheme.colorScheme
     val rowingColors = LocalRowingColors.current
 
-    val totalMeters = workouts.sumOf { it.totalDistanceMeters }
-    val totalSeconds = workouts.sumOf { it.durationSeconds }
+    val realCount = remember(workouts) { workouts.count { !it.isSimulated } }
+    val simCount = remember(workouts) { workouts.count { it.isSimulated } }
+
+    var explicitFilter by rememberSaveable { mutableStateOf<HistoryFilter?>(null) }
+    val activeFilter = explicitFilter ?: if (realCount > 0 || workouts.isEmpty()) {
+        HistoryFilter.REAL
+    } else {
+        HistoryFilter.ALL
+    }
+
+    val filteredWorkouts = remember(workouts, activeFilter) {
+        when (activeFilter) {
+            HistoryFilter.REAL -> workouts.filter { !it.isSimulated }
+            HistoryFilter.SIMULATED -> workouts.filter { it.isSimulated }
+            HistoryFilter.ALL -> workouts
+        }
+    }
+
+    val totalMeters = filteredWorkouts.sumOf { it.totalDistanceMeters }
+    val totalSeconds = filteredWorkouts.sumOf { it.durationSeconds }
 
     Box(
         modifier = Modifier.fillMaxSize(),
@@ -67,15 +97,41 @@ fun HistoryScreen(
                 .widthIn(max = 960.dp)
                 .fillMaxSize()
                 .padding(horizontal = 20.dp, vertical = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            Text(
-                text = "Trainingshistorie",
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold,
-            )
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    text = "Trainingshistorie",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                )
 
-            // Summary Banner
+                if (workouts.isNotEmpty()) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        HistoryFilter.entries.forEach { filter ->
+                            val count = when (filter) {
+                                HistoryFilter.REAL -> realCount
+                                HistoryFilter.SIMULATED -> simCount
+                                HistoryFilter.ALL -> workouts.size
+                            }
+                            FilterChip(
+                                selected = activeFilter == filter,
+                                onClick = { explicitFilter = filter },
+                                label = { Text("${filter.label} ($count)") },
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Summary Banner (reflects active filter so simulator runs don't pollute real stats)
             Card(
                 colors = CardDefaults.cardColors(containerColor = colorScheme.surfaceContainerHigh),
                 shape = MaterialTheme.shapes.medium,
@@ -89,7 +145,7 @@ fun HistoryScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    SummaryStat("EINHEITEN", "${workouts.size}")
+                    SummaryStat("EINHEITEN", "${filteredWorkouts.size}")
                     SummaryStat(
                         "GESAMTDISTANZ",
                         RowingTelemetry.formatDistance(totalMeters),
@@ -99,7 +155,7 @@ fun HistoryScreen(
                 }
             }
 
-            if (workouts.isEmpty()) {
+            if (filteredWorkouts.isEmpty()) {
                 Card(
                     colors = CardDefaults.cardColors(containerColor = colorScheme.surfaceContainerLow),
                     shape = MaterialTheme.shapes.medium,
@@ -127,19 +183,35 @@ fun HistoryScreen(
                             )
                         }
                         Spacer(Modifier.height(16.dp))
+                        val emptyTitle = when {
+                            workouts.isEmpty() -> "Noch keine Ruder-Einheiten gespeichert"
+                            activeFilter == HistoryFilter.REAL -> "Noch keine echten Ruder-Einheiten"
+                            else -> "Keine Simulator-Einheiten vorhanden"
+                        }
+                        val emptySubtitle = when {
+                            workouts.isEmpty() -> "Verbinde dein S4 Comms 61 oder teste den Simulator im Tab „Rudern“."
+                            activeFilter == HistoryFilter.REAL -> "Deine Simulator-Testläufe werden getrennt gehalten, damit echte Statistiken sauber bleiben."
+                            else -> "Aktiviere den Simulator im Tab „Rudern“, um Testläufe aufzuzeichnen."
+                        }
                         Text(
-                            text = "Noch keine Ruder-Einheiten gespeichert",
+                            text = emptyTitle,
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.SemiBold,
                             textAlign = TextAlign.Center,
                         )
                         Spacer(Modifier.height(6.dp))
                         Text(
-                            text = "Verbinde dein S4 Comms 61 oder teste den Simulator im Tab „Rudern“.",
+                            text = emptySubtitle,
                             style = MaterialTheme.typography.bodyMedium,
                             color = colorScheme.onSurfaceVariant,
                             textAlign = TextAlign.Center,
                         )
+                        if (workouts.isNotEmpty()) {
+                            Spacer(Modifier.height(16.dp))
+                            FilledTonalButton(onClick = { explicitFilter = HistoryFilter.ALL }) {
+                                Text("Alle Einheiten anzeigen (${workouts.size})")
+                            }
+                        }
                     }
                 }
             } else {
@@ -148,7 +220,7 @@ fun HistoryScreen(
                     contentPadding = PaddingValues(bottom = 16.dp),
                     modifier = Modifier.fillMaxSize(),
                 ) {
-                    items(workouts, key = { it.id }) { workout ->
+                    items(filteredWorkouts, key = { it.id }) { workout ->
                         Card(
                             onClick = { onSelectWorkout(workout.id) },
                             colors = CardDefaults.cardColors(containerColor = colorScheme.surfaceContainerLow),
