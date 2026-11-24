@@ -36,6 +36,8 @@ import androidx.compose.material.icons.rounded.PlayCircleOutline
 import androidx.compose.material.icons.rounded.RestartAlt
 import androidx.compose.material.icons.rounded.Science
 import androidx.compose.material.icons.rounded.Storage
+import androidx.compose.material.icons.rounded.SystemUpdate
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -43,6 +45,7 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
@@ -59,6 +62,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -69,6 +73,8 @@ import com.waterrower.tracker.data.OverlaySettings
 import com.waterrower.tracker.model.BleDiagnostics
 import com.waterrower.tracker.model.ConnectionState
 import com.waterrower.tracker.ui.theme.LocalRowingColors
+import com.waterrower.tracker.update.ReleaseInfo
+import com.waterrower.tracker.update.UpdateUiState
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -85,6 +91,8 @@ fun SettingsScreen(
     isSimulatorMode: Boolean,
     workoutCount: Int,
     isBackupBusy: Boolean,
+    currentVersionName: String,
+    updateState: UpdateUiState,
     onOpacityChange: (Float) -> Unit,
     onScaleChange: (Float) -> Unit,
     onShowWattsInMiniChange: (Boolean) -> Unit,
@@ -94,6 +102,9 @@ fun SettingsScreen(
     onResetOverlayPosition: () -> Unit,
     onExportBackup: () -> Unit,
     onImportBackup: () -> Unit,
+    onCheckForUpdate: () -> Unit,
+    onDownloadAndInstallUpdate: (ReleaseInfo) -> Unit,
+    onInstallDownloadedUpdate: () -> Unit,
     onToggleSimulator: (Boolean) -> Unit,
     onConnectSimulator: () -> Unit,
     onShowMessage: (String) -> Unit,
@@ -427,7 +438,152 @@ fun SettingsScreen(
                 }
             }
 
-            // 3. Collapsible Developer Tools & BLE Diagnostics
+            // 3. In-App GitHub Release Self-Updater
+            Card(
+                colors = CardDefaults.cardColors(containerColor = colorScheme.surfaceContainerLow),
+                shape = MaterialTheme.shapes.medium,
+                border = BorderStroke(1.dp, colorScheme.outlineVariant.copy(alpha = 0.45f)),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(
+                    modifier = Modifier.padding(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.SystemUpdate,
+                            contentDescription = null,
+                            tint = colorScheme.primary,
+                        )
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(
+                                text = "App-Updates (GitHub)",
+                                style = MaterialTheme.typography.titleLarge,
+                            )
+                            Text(
+                                text = "Installierte Version: v$currentVersionName • Offline, bis du prüfst",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+
+                    when (val state = updateState) {
+                        UpdateUiState.Idle -> {
+                            FilledTonalButton(onClick = onCheckForUpdate) {
+                                Text("Nach Updates suchen")
+                            }
+                        }
+                        UpdateUiState.Checking -> {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            ) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    strokeWidth = 2.dp,
+                                )
+                                Text(
+                                    text = "Prüfe GitHub Releases…",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                        is UpdateUiState.UpToDate -> {
+                            Text(
+                                text = "Alles aktuell (${state.latestTag} ist die neueste Version).",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = rowingColors.active,
+                                fontWeight = FontWeight.Medium,
+                            )
+                            OutlinedButton(onClick = onCheckForUpdate) {
+                                Text("Erneut prüfen")
+                            }
+                        }
+                        is UpdateUiState.Available -> {
+                            val sizeSuffix = state.release.formattedSizeMb
+                                .takeIf { it.isNotBlank() }
+                                ?.let { " ($it)" }
+                                .orEmpty()
+                            Text(
+                                text = "Neue Version verfügbar: ${state.release.tagName}$sizeSuffix",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = colorScheme.primary,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            if (state.release.notes.isNotBlank()) {
+                                val shortNotes = remember(state.release.notes) {
+                                    state.release.notes.lines()
+                                        .filter { it.isNotBlank() }
+                                        .take(4)
+                                        .joinToString("\n")
+                                }
+                                Text(
+                                    text = shortNotes,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Button(onClick = { onDownloadAndInstallUpdate(state.release) }) {
+                                    Text("Herunterladen & installieren")
+                                }
+                                OutlinedButton(onClick = onCheckForUpdate) {
+                                    Text("Erneut prüfen")
+                                }
+                            }
+                        }
+                        is UpdateUiState.Downloading -> {
+                            val pct = (state.progress * 100f).roundToInt()
+                            Text(
+                                text = "Lade ${state.release.tagName} herunter… $pct%",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium,
+                            )
+                            LinearProgressIndicator(
+                                progress = { state.progress },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(999.dp)),
+                                strokeCap = StrokeCap.Round,
+                            )
+                        }
+                        is UpdateUiState.ReadyToInstall -> {
+                            Text(
+                                text = if (state.needsInstallPermission) {
+                                    "${state.release.tagName} ist bereit. Erlaube einmalig „Apps aus dieser Quelle installieren“ und tippe dann auf Installieren."
+                                } else {
+                                    "${state.release.tagName} wurde heruntergeladen und ist bereit zur Installation."
+                                },
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = colorScheme.onSurfaceVariant,
+                            )
+                            Button(onClick = onInstallDownloadedUpdate) {
+                                Text("Jetzt installieren")
+                            }
+                        }
+                        is UpdateUiState.Error -> {
+                            Text(
+                                text = state.message,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colorScheme.error,
+                            )
+                            OutlinedButton(onClick = onCheckForUpdate) {
+                                Text("Erneut versuchen")
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 4. Collapsible Developer Tools & BLE Diagnostics
             Card(
                 colors = CardDefaults.cardColors(containerColor = colorScheme.surfaceContainerLow),
                 shape = MaterialTheme.shapes.medium,

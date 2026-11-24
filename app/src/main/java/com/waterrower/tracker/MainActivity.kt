@@ -76,6 +76,11 @@ import com.waterrower.tracker.ui.SettingsScreen
 import com.waterrower.tracker.ui.WorkoutDetailScreen
 import com.waterrower.tracker.ui.theme.LocalRowingColors
 import com.waterrower.tracker.ui.theme.WaterRowerTheme
+import com.waterrower.tracker.update.AppUpdater
+import com.waterrower.tracker.update.InstallLaunchResult
+import com.waterrower.tracker.update.ReleaseInfo
+import com.waterrower.tracker.update.UpdateCheckResult
+import com.waterrower.tracker.update.UpdateUiState
 import kotlinx.coroutines.launch
 
 private enum class AppTab(val label: String, val icon: ImageVector) {
@@ -95,6 +100,7 @@ class MainActivity : ComponentActivity() {
     private var hasRequestedNotificationPermission = false
     private var permissionDialogState by mutableStateOf<BlePermissionDialogState?>(null)
     private var isBackupBusy by mutableStateOf(false)
+    private var updateState by mutableStateOf<UpdateUiState>(UpdateUiState.Idle)
 
     private val exportBackupLauncher = registerForActivityResult(
         ActivityResultContracts.CreateDocument("application/json"),
@@ -178,6 +184,7 @@ class MainActivity : ComponentActivity() {
                     activity = this,
                     permissionDialogState = permissionDialogState,
                     isBackupBusy = isBackupBusy,
+                    updateState = updateState,
                     onDismissPermissionDialog = {
                         pendingAfterPermissions = null
                         permissionDialogState = null
@@ -198,8 +205,20 @@ class MainActivity : ComponentActivity() {
                     onResetOverlayPosition = { handleResetOverlayPosition() },
                     onExportBackup = { handleLaunchBackupExport() },
                     onImportBackup = { handleLaunchBackupImport() },
+                    onCheckForUpdate = { handleCheckForUpdate() },
+                    onDownloadAndInstallUpdate = { release -> handleDownloadAndInstallUpdate(release) },
+                    onInstallDownloadedUpdate = { handleInstallReadyApk() },
                 )
             }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        val ready = updateState as? UpdateUiState.ReadyToInstall
+        if (ready != null && ready.needsInstallPermission && packageManager.canRequestPackageInstalls()) {
+            updateState = ready.copy(needsInstallPermission = false)
+            handleInstallReadyApk()
         }
     }
 
@@ -385,6 +404,90 @@ class MainActivity : ComponentActivity() {
         app.sessionHub.emitUiMessage("Overlay-Position wurde zurückgesetzt.")
     }
 
+    private fun handleCheckForUpdate() {
+        if (updateState is UpdateUiState.Checking || updateState is UpdateUiState.Downloading) return
+        updateState = UpdateUiState.Checking
+        lifecycleScope.launch {
+            val result = AppUpdater.checkForUpdate(BuildConfig.VERSION_NAME)
+            result.onSuccess { check ->
+                updateState = when (check) {
+                    is UpdateCheckResult.UpdateAvailable -> UpdateUiState.Available(check.release)
+                    is UpdateCheckResult.UpToDate -> UpdateUiState.UpToDate(check.latestTag)
+                }
+            }.onFailure { err ->
+                updateState = UpdateUiState.Error(
+                    "Update-Prüfung fehlgeschlagen: ${err.localizedMessage ?: "Keine Verbindung zu GitHub"}",
+                )
+            }
+        }
+    }
+
+    private fun handleDownloadAndInstallUpdate(release: ReleaseInfo) {
+        if (updateState is UpdateUiState.Downloading) return
+        updateState = UpdateUiState.Downloading(release, progress = 0f)
+        lifecycleScope.launch {
+            val result = AppUpdater.downloadApk(
+                context = this@MainActivity,
+                release = release,
+                currentVersionName = BuildConfig.VERSION_NAME,
+                onProgress = { fraction ->
+                    runOnUiThread {
+                        if (updateState is UpdateUiState.Downloading) {
+                            updateState = UpdateUiState.Downloading(release, fraction)
+                        }
+                    }
+                },
+            )
+            result.onSuccess { apkFile ->
+                val launch = AppUpdater.installApk(this@MainActivity, apkFile)
+                when (launch) {
+                    InstallLaunchResult.LAUNCHED_INSTALLER -> {
+                        updateState = UpdateUiState.ReadyToInstall(
+                            release = release,
+                            apkFile = apkFile,
+                            needsInstallPermission = false,
+                        )
+                    }
+                    InstallLaunchResult.NEEDS_UNKNOWN_SOURCES_PERMISSION -> {
+                        updateState = UpdateUiState.ReadyToInstall(
+                            release = release,
+                            apkFile = apkFile,
+                            needsInstallPermission = true,
+                        )
+                        app.sessionHub.emitUiMessage(
+                            "Bitte erlaube einmalig „Apps aus dieser Quelle installieren“ für WaterRower.",
+                        )
+                    }
+                    InstallLaunchResult.FAILED -> {
+                        updateState = UpdateUiState.Error("Installer konnte nicht gestartet werden.")
+                    }
+                }
+            }.onFailure { err ->
+                updateState = UpdateUiState.Error(
+                    "Download fehlgeschlagen: ${err.localizedMessage ?: "Unbekannter Fehler"}",
+                )
+            }
+        }
+    }
+
+    private fun handleInstallReadyApk() {
+        val ready = updateState as? UpdateUiState.ReadyToInstall ?: return
+        when (AppUpdater.installApk(this, ready.apkFile)) {
+            InstallLaunchResult.LAUNCHED_INSTALLER -> {
+                updateState = ready.copy(needsInstallPermission = false)
+            }
+            InstallLaunchResult.NEEDS_UNKNOWN_SOURCES_PERMISSION -> {
+                updateState = ready.copy(needsInstallPermission = true)
+                app.sessionHub.emitUiMessage(
+                    "Bitte erlaube einmalig „Apps aus dieser Quelle installieren“ für WaterRower.",
+                )
+            }
+            InstallLaunchResult.FAILED -> {
+                updateState = UpdateUiState.Error("Heruntergeladene APK nicht mehr verfügbar – bitte erneut laden.")
+            }
+        }
+    }
+
     companion object {
         private const val KEY_REQUESTED_NOTIFICATION_PERMISSION = "requested_notification_permission"
     }
@@ -395,6 +498,7 @@ private fun WaterRowerRoot(
     activity: MainActivity,
     permissionDialogState: BlePermissionDialogState?,
     isBackupBusy: Boolean,
+    updateState: UpdateUiState,
     onDismissPermissionDialog: () -> Unit,
     onRetryBlePermissions: () -> Unit,
     onOpenAppSettings: () -> Unit,
@@ -405,6 +509,9 @@ private fun WaterRowerRoot(
     onResetOverlayPosition: () -> Unit,
     onExportBackup: () -> Unit,
     onImportBackup: () -> Unit,
+    onCheckForUpdate: () -> Unit,
+    onDownloadAndInstallUpdate: (ReleaseInfo) -> Unit,
+    onInstallDownloadedUpdate: () -> Unit,
 ) {
     val app = activity.application as WaterRowerApp
     val hub = app.sessionHub
@@ -607,6 +714,7 @@ private fun WaterRowerRoot(
                                 isOverlayVisible = isOverlayVisible,
                                 isSimulatorMode = isSimulatorMode,
                                 isBackupBusy = isBackupBusy,
+                                updateState = updateState,
                                 settings = settings,
                                 workouts = workouts,
                                 activity = activity,
@@ -617,6 +725,9 @@ private fun WaterRowerRoot(
                                 onResetOverlayPosition = onResetOverlayPosition,
                                 onExportBackup = onExportBackup,
                                 onImportBackup = onImportBackup,
+                                onCheckForUpdate = onCheckForUpdate,
+                                onDownloadAndInstallUpdate = onDownloadAndInstallUpdate,
+                                onInstallDownloadedUpdate = onInstallDownloadedUpdate,
                                 onShowMessage = showMessage,
                             )
                         }
@@ -671,6 +782,7 @@ private fun WaterRowerRoot(
                             isOverlayVisible = isOverlayVisible,
                             isSimulatorMode = isSimulatorMode,
                             isBackupBusy = isBackupBusy,
+                            updateState = updateState,
                             settings = settings,
                             workouts = workouts,
                             activity = activity,
@@ -681,6 +793,9 @@ private fun WaterRowerRoot(
                             onResetOverlayPosition = onResetOverlayPosition,
                             onExportBackup = onExportBackup,
                             onImportBackup = onImportBackup,
+                            onCheckForUpdate = onCheckForUpdate,
+                            onDownloadAndInstallUpdate = onDownloadAndInstallUpdate,
+                            onInstallDownloadedUpdate = onInstallDownloadedUpdate,
                             onShowMessage = showMessage,
                         )
                     }
@@ -711,6 +826,7 @@ private fun TabContent(
     isOverlayVisible: Boolean,
     isSimulatorMode: Boolean,
     isBackupBusy: Boolean,
+    updateState: UpdateUiState,
     settings: com.waterrower.tracker.data.OverlaySettings,
     workouts: List<com.waterrower.tracker.data.WorkoutEntity>,
     activity: MainActivity,
@@ -721,6 +837,9 @@ private fun TabContent(
     onResetOverlayPosition: () -> Unit,
     onExportBackup: () -> Unit,
     onImportBackup: () -> Unit,
+    onCheckForUpdate: () -> Unit,
+    onDownloadAndInstallUpdate: (ReleaseInfo) -> Unit,
+    onInstallDownloadedUpdate: () -> Unit,
     onShowMessage: (String) -> Unit,
 ) {
     val app = activity.application as WaterRowerApp
@@ -792,6 +911,8 @@ private fun TabContent(
             isSimulatorMode = isSimulatorMode,
             workoutCount = workouts.size,
             isBackupBusy = isBackupBusy,
+            currentVersionName = BuildConfig.VERSION_NAME,
+            updateState = updateState,
             onOpacityChange = { prefs.setOpacity(it) },
             onScaleChange = { prefs.setScale(it) },
             onShowWattsInMiniChange = { prefs.setShowWattsInMini(it) },
@@ -801,6 +922,9 @@ private fun TabContent(
             onResetOverlayPosition = onResetOverlayPosition,
             onExportBackup = onExportBackup,
             onImportBackup = onImportBackup,
+            onCheckForUpdate = onCheckForUpdate,
+            onDownloadAndInstallUpdate = onDownloadAndInstallUpdate,
+            onInstallDownloadedUpdate = onInstallDownloadedUpdate,
             onToggleSimulator = { enabled ->
                 if (enabled) {
                     onStartSimulator()

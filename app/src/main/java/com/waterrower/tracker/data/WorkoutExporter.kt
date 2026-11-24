@@ -309,6 +309,10 @@ object WorkoutExporter {
     /**
      * Minimal RFC-8259 JSON parser in pure Kotlin (no Android framework dependency).
      */
+    @Suppress("UNCHECKED_CAST")
+    internal fun parseJsonObject(raw: String): Map<String, Any?>? =
+        SimpleJsonParser(raw).parseRoot() as? Map<String, Any?>
+
     private class SimpleJsonParser(private val input: String) {
         private var pos = 0
 
