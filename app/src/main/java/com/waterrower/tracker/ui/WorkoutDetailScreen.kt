@@ -192,17 +192,35 @@ fun WorkoutDetailScreen(
                             style = MaterialTheme.typography.titleLarge,
                             fontWeight = FontWeight.Bold,
                         )
-                        if (current?.isSimulated == true) {
-                            Surface(
-                                color = colorScheme.tertiaryContainer,
-                                contentColor = colorScheme.onTertiaryContainer,
-                                shape = RoundedCornerShape(999.dp),
-                            ) {
-                                Text(
-                                    text = "Simulator",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                                )
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            current?.programSummary?.let { prog ->
+                                Surface(
+                                    color = colorScheme.primaryContainer,
+                                    contentColor = colorScheme.onPrimaryContainer,
+                                    shape = RoundedCornerShape(999.dp),
+                                ) {
+                                    Text(
+                                        text = prog,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                    )
+                                }
+                            }
+                            if (current?.isSimulated == true) {
+                                Surface(
+                                    color = colorScheme.tertiaryContainer,
+                                    contentColor = colorScheme.onTertiaryContainer,
+                                    shape = RoundedCornerShape(999.dp),
+                                ) {
+                                    Text(
+                                        text = "Simulator",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                    )
+                                }
                             }
                         }
                     }

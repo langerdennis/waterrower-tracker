@@ -158,4 +158,26 @@ class WorkoutExporterTest {
         assertTrue(WorkoutExporter.parseBackupJson("{\"hello\":\"world\"}").isFailure)
         assertTrue(WorkoutExporter.parseBackupJson("[]").isFailure)
     }
+
+    @Test
+    fun buildAndParseBackupJson_roundTripsProgramSummaryAndSupportsLegacyNull() {
+        val withProgram = sampleWorkout.copy(
+            id = "wk-prog-1",
+            programSummary = "Row & KB Swing (Mittel)",
+        )
+        val json = WorkoutExporter.buildBackupJson(
+            listOf(RecordedWorkout(withProgram, samples)),
+            exportedAtEpochMs = 1_700_030_000_000L,
+        )
+        assertTrue(json.contains("\"programSummary\": \"Row & KB Swing (Mittel)\""))
+
+        val parsed = WorkoutExporter.parseBackupJson(json).getOrThrow()
+        assertEquals(1, parsed.size)
+        assertEquals("Row & KB Swing (Mittel)", parsed[0].workout.programSummary)
+
+        // Legacy v1 JSON without programSummary field parses cleanly with null
+        val legacyJson = json.replace("\"programSummary\": \"Row & KB Swing (Mittel)\",\n", "")
+        val legacyParsed = WorkoutExporter.parseBackupJson(legacyJson).getOrThrow()
+        assertEquals(null, legacyParsed[0].workout.programSummary)
+    }
 }

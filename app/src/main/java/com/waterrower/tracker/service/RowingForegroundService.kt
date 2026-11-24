@@ -26,6 +26,7 @@ import com.waterrower.tracker.WaterRowerApp
 import com.waterrower.tracker.data.RecordingState
 import com.waterrower.tracker.model.ConnectionState
 import com.waterrower.tracker.model.GhostDelta
+import com.waterrower.tracker.model.ProgramProgressState
 import com.waterrower.tracker.model.RowingTelemetry
 import com.waterrower.tracker.model.WorkoutGoal
 import com.waterrower.tracker.overlay.FloatingOverlayController
@@ -64,6 +65,7 @@ class RowingForegroundService : LifecycleService() {
             onStartRecording = { hub.startRecording() },
             onTogglePause = { hub.togglePauseRecording() },
             onStopAndSave = { hub.stopAndSaveRecording() },
+            onAdvanceProgramStep = { hub.advanceProgramStep() },
             onOpenApp = {
                 val intent = Intent(this, MainActivity::class.java).apply {
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
@@ -76,16 +78,28 @@ class RowingForegroundService : LifecycleService() {
         )
 
         lifecycleScope.launch {
-            val goalAndGhost = combine(hub.activeGoal, hub.ghostDelta) { goal, ghost ->
-                goal to ghost
+            hub.audioCueEvents.collect {
+                if (prefs.settings.value.goalSoundEnabled) {
+                    playGoalChime()
+                }
+            }
+        }
+
+        lifecycleScope.launch {
+            val trainingExtras = combine(
+                hub.activeGoal,
+                hub.ghostDelta,
+                hub.activeProgram,
+            ) { goal, ghost, program ->
+                Triple(goal, ghost, program)
             }
             combine(
                 hub.telemetry,
                 hub.connectionState,
                 hub.recordingState,
                 prefs.settings,
-                combine(hub.isOverlayVisible, goalAndGhost) { visible, gg ->
-                    Triple(visible, gg.first, gg.second)
+                combine(hub.isOverlayVisible, trainingExtras) { visible, te ->
+                    visible to te
                 },
             ) { telemetry, conn, rec, settings, extras ->
                 OverlaySnapshot(
@@ -94,8 +108,9 @@ class RowingForegroundService : LifecycleService() {
                     recording = rec,
                     settings = settings,
                     overlayVisible = extras.first,
-                    goal = extras.second,
-                    ghostDelta = extras.third,
+                    goal = extras.second.first,
+                    ghostDelta = extras.second.second,
+                    program = extras.second.third,
                 )
             }.collect { snap ->
                 runOnMain {
@@ -106,6 +121,7 @@ class RowingForegroundService : LifecycleService() {
                         settings = snap.settings,
                         goal = snap.goal,
                         ghostDelta = snap.ghostDelta,
+                        program = snap.program,
                     )
                 }
                 checkGoalCompletionCue(snap)
@@ -385,7 +401,9 @@ class RowingForegroundService : LifecycleService() {
         val goalKey = "${rec.workoutId}:${goal.distanceTargetMeters}:${goal.durationTargetSeconds}"
         if (goal.isCompleted(rec.distanceMeters, rec.elapsedSeconds) && completedGoalKey != goalKey) {
             completedGoalKey = goalKey
-            playGoalChime()
+            if (snap.settings.goalSoundEnabled) {
+                playGoalChime()
+            }
             hub.emitUiMessage("Ziel erreicht! (${goal.shortSummary()})")
         }
     }
@@ -413,6 +431,7 @@ class RowingForegroundService : LifecycleService() {
         val overlayVisible: Boolean,
         val goal: WorkoutGoal,
         val ghostDelta: GhostDelta?,
+        val program: ProgramProgressState?,
     )
 
     companion object {

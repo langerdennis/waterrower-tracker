@@ -276,6 +276,19 @@ fun HistoryScreen(
                                             style = MaterialTheme.typography.labelMedium,
                                             color = colorScheme.onSurfaceVariant,
                                         )
+                                        if (workout.programSummary != null) {
+                                            Surface(
+                                                color = colorScheme.primaryContainer,
+                                                contentColor = colorScheme.onPrimaryContainer,
+                                                shape = RoundedCornerShape(999.dp),
+                                            ) {
+                                                Text(
+                                                    text = workout.programSummary,
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                                )
+                                            }
+                                        }
                                         if (workout.isSimulated) {
                                             Surface(
                                                 color = colorScheme.tertiaryContainer,

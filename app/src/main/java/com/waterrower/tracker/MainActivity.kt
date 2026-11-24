@@ -417,6 +417,7 @@ private fun WaterRowerRoot(
     val diagnostics by hub.diagnostics.collectAsStateWithLifecycle()
     val recordingState by hub.recordingState.collectAsStateWithLifecycle()
     val activeGoal by hub.activeGoal.collectAsStateWithLifecycle()
+    val activeProgram by hub.activeProgram.collectAsStateWithLifecycle()
     val ghostReference by hub.ghostReference.collectAsStateWithLifecycle()
     val ghostDelta by hub.ghostDelta.collectAsStateWithLifecycle()
     val isOverlayVisible by hub.isOverlayVisible.collectAsStateWithLifecycle()
@@ -600,6 +601,7 @@ private fun WaterRowerRoot(
                                 diagnostics = diagnostics,
                                 recordingState = recordingState,
                                 activeGoal = activeGoal,
+                                activeProgram = activeProgram,
                                 ghostReference = ghostReference,
                                 ghostDelta = ghostDelta,
                                 isOverlayVisible = isOverlayVisible,
@@ -663,6 +665,7 @@ private fun WaterRowerRoot(
                             diagnostics = diagnostics,
                             recordingState = recordingState,
                             activeGoal = activeGoal,
+                            activeProgram = activeProgram,
                             ghostReference = ghostReference,
                             ghostDelta = ghostDelta,
                             isOverlayVisible = isOverlayVisible,
@@ -702,6 +705,7 @@ private fun TabContent(
     diagnostics: com.waterrower.tracker.model.BleDiagnostics,
     recordingState: RecordingState,
     activeGoal: com.waterrower.tracker.model.WorkoutGoal,
+    activeProgram: com.waterrower.tracker.model.ProgramProgressState?,
     ghostReference: com.waterrower.tracker.model.GhostReference?,
     ghostDelta: com.waterrower.tracker.model.GhostDelta?,
     isOverlayVisible: Boolean,
@@ -734,6 +738,7 @@ private fun TabContent(
             isSimulatorMode = isSimulatorMode,
             settings = settings,
             activeGoal = activeGoal,
+            activeProgram = activeProgram,
             ghostReference = ghostReference,
             ghostDelta = ghostDelta,
             recentWorkouts = workouts,
@@ -758,6 +763,8 @@ private fun TabContent(
             onTogglePause = { hub.togglePauseRecording() },
             onStopAndSave = { hub.stopAndSaveRecording() },
             onUpdateGoal = { hub.setWorkoutGoal(it) },
+            onSelectProgram = { preset, scale -> hub.selectProgram(preset, scale) },
+            onAdvanceProgramStep = { hub.advanceProgramStep() },
             onSelectGhostWorkout = { hub.selectGhostWorkout(it) },
             onOpenSettings = onOpenSettings,
         )
@@ -790,6 +797,7 @@ private fun TabContent(
             onShowWattsInMiniChange = { prefs.setShowWattsInMini(it) },
             onAutoStartChange = { prefs.setAutoStartRecording(it) },
             onAutoFinishMinutesChange = { prefs.setAutoFinishIdleMinutes(it) },
+            onGoalSoundChange = { prefs.setGoalSoundEnabled(it) },
             onResetOverlayPosition = onResetOverlayPosition,
             onExportBackup = onExportBackup,
             onImportBackup = onImportBackup,

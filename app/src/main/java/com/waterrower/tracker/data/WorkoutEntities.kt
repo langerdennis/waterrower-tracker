@@ -20,6 +20,7 @@ data class WorkoutEntity(
     val avgHeartRateBpm: Int? = null,
     val isSimulated: Boolean = false,
     val syncedAtEpochMs: Long? = null,
+    val programSummary: String? = null,
 )
 
 @Entity(

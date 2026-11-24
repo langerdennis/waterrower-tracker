@@ -26,6 +26,8 @@ import com.waterrower.tracker.data.RecordingState
 import com.waterrower.tracker.model.ConnectionState
 import com.waterrower.tracker.model.GhostDelta
 import com.waterrower.tracker.model.PaceZone
+import com.waterrower.tracker.model.ProgramProgressState
+import com.waterrower.tracker.model.ProgramStep
 import com.waterrower.tracker.model.RowingTelemetry
 import com.waterrower.tracker.model.WorkoutGoal
 import java.util.Locale
@@ -39,7 +41,8 @@ import kotlin.math.roundToInt
  * - Touch events outside the pill pass straight through to the underlying app.
  * - Drag anywhere on screen (clamped to screen & display cutout bounds, position persisted).
  * - Tap to toggle between compact Mini-Pill and Expanded Controls (Pause/Weiter + Stop & Save).
- * - Optional slim progress bar, peripheral target-pace border tint, and live ghost delta.
+ * - Optional slim progress bar, peripheral target-pace border tint, live ghost delta,
+ *   and compact interval / hybrid Row+KB/Mat step prompts.
  */
 class FloatingOverlayController(
     private val context: Context,
@@ -47,6 +50,7 @@ class FloatingOverlayController(
     private val onStartRecording: () -> Unit,
     private val onTogglePause: () -> Unit,
     private val onStopAndSave: () -> Unit,
+    private val onAdvanceProgramStep: () -> Unit,
     private val onOpenApp: () -> Unit,
     private val onCloseOverlay: () -> Unit,
 ) {
@@ -61,6 +65,7 @@ class FloatingOverlayController(
     private var progressRemainder: View? = null
     private var expandedRow: LinearLayout? = null
     private var extraMetricsView: TextView? = null
+    private var nextStepButton: TextView? = null
     private var pauseButton: TextView? = null
     private var recordButton: TextView? = null
 
@@ -79,6 +84,7 @@ class FloatingOverlayController(
     private var appliedProgressColor: Int = 0
     private var lastMiniKey: String? = null
     private var lastExtraText: String? = null
+    private var lastNextStepVisible: Boolean? = null
     private var lastPauseVisible: Boolean? = null
     private var lastPauseText: String? = null
     private var lastPauseColor: Int = 0
@@ -94,6 +100,7 @@ class FloatingOverlayController(
     private var lastSettings: OverlaySettings = preferences.settings.value
     private var lastGoal: WorkoutGoal = WorkoutGoal()
     private var lastGhostDelta: GhostDelta? = null
+    private var lastProgram: ProgramProgressState? = null
 
     val isShowing: Boolean get() = rootView != null
 
@@ -145,7 +152,7 @@ class FloatingOverlayController(
         topRow.addView(miniText)
         container.addView(topRow)
 
-        // Slim goal progress bar (visible only when a distance or duration goal is set)
+        // Slim goal/program progress bar
         val fillView = View(context).apply {
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 0f)
             background = fillBg
@@ -187,6 +194,11 @@ class FloatingOverlayController(
             gravity = Gravity.CENTER_VERTICAL
         }
 
+        val nextBtn = createActionChip("Nächster", createChipDrawable(COLOR_VIOLET)) {
+            onAdvanceProgramStep()
+        }.apply {
+            visibility = View.GONE
+        }
         val pauseBtn = createActionChip("Pause", pauseBg) {
             if (lastRecording is RecordingState.Active) {
                 onTogglePause()
@@ -204,6 +216,7 @@ class FloatingOverlayController(
         val appBtn = createActionChip("App", createChipDrawable(COLOR_SLATE_CHIP)) { onOpenApp() }
         val closeBtn = createActionChip("Ausblenden", createChipDrawable(COLOR_CLOSE_CHIP)) { onCloseOverlay() }
 
+        actionRow.addView(nextBtn)
         actionRow.addView(pauseBtn)
         actionRow.addView(recBtn)
         actionRow.addView(appBtn)
@@ -310,6 +323,7 @@ class FloatingOverlayController(
             progressRemainder = remView
             expandedRow = expanded
             extraMetricsView = extraMetrics
+            nextStepButton = nextBtn
             pauseButton = pauseBtn
             recordButton = recBtn
             pillDrawable = pillBg
@@ -345,6 +359,7 @@ class FloatingOverlayController(
         progressRemainder = null
         expandedRow = null
         extraMetricsView = null
+        nextStepButton = null
         pauseButton = null
         recordButton = null
         pillDrawable = null
@@ -395,6 +410,7 @@ class FloatingOverlayController(
         settings: OverlaySettings = lastSettings,
         goal: WorkoutGoal = lastGoal,
         ghostDelta: GhostDelta? = lastGhostDelta,
+        program: ProgramProgressState? = lastProgram,
     ) {
         lastTelemetry = telemetry
         lastConnection = connection
@@ -402,6 +418,7 @@ class FloatingOverlayController(
         lastSettings = settings
         lastGoal = goal
         lastGhostDelta = ghostDelta
+        lastProgram = program
         render()
     }
 
@@ -436,8 +453,12 @@ class FloatingOverlayController(
             RecordingState.Idle -> lastTelemetry.distanceMeters
         }
 
+        val program = lastProgram
         val paceZone = lastGoal.evaluatePaceZone(lastTelemetry.paceSecondsPer500m)
         val borderBaseColor = when {
+            program?.isCompleted == true -> COLOR_ACTIVE_GREEN
+            program?.currentStep is ProgramStep.OffRowerStation -> COLOR_VIOLET
+            program?.currentStep is ProgramStep.TimedRest -> COLOR_AMBER
             lastGoal.isCompleted(distMeters, elapsedSec) -> COLOR_ACTIVE_GREEN
             paceZone == PaceZone.ON_TARGET -> COLOR_ACTIVE_GREEN
             paceZone == PaceZone.SLOWER -> COLOR_AMBER
@@ -458,6 +479,8 @@ class FloatingOverlayController(
         }
 
         val dotColor = when {
+            program?.currentStep is ProgramStep.OffRowerStation && !program.isCompleted -> COLOR_VIOLET
+            program?.currentStep is ProgramStep.TimedRest && !program.isCompleted -> COLOR_AMBER
             rec is RecordingState.Active && !rec.isPaused -> COLOR_ACTIVE_GREEN
             rec is RecordingState.Active && rec.isPaused -> COLOR_AMBER
             lastConnection is ConnectionState.Connected -> COLOR_CONNECTED_SKY
@@ -477,9 +500,31 @@ class FloatingOverlayController(
         } else {
             ""
         }
-        val baseMini =
-            "${lastTelemetry.formattedPace} /500m  •  $spmText spm  •  $distToShow  •  $elapsedToShow$wattsSuffix"
-        val ghost = lastGhostDelta
+
+        val baseMini = when {
+            program != null && program.isCompleted ->
+                "✓ ${program.plan.titleWithScale}  •  $distToShow  •  $elapsedToShow"
+            program != null && program.currentStep is ProgramStep.TimedRest -> {
+                val step = program.currentStep
+                "Pause ${RowingTelemetry.formatDuration(program.restRemainingSeconds)}  •  danach ${step.nextDescription}"
+            }
+            program != null && program.currentStep is ProgramStep.OffRowerStation -> {
+                val step = program.currentStep
+                val nextHint = step.nextRoundLabel?.let { "Ziehen für $it" } ?: "Fertig → Stop & Save"
+                "R${step.roundIndex}/${step.totalRounds}: ${step.exerciseLabel}  •  $nextHint"
+            }
+            program != null && program.currentStep is ProgramStep.RowingDistance -> {
+                val step = program.currentStep
+                val remM = (step.targetMeters - program.stepDistanceMeters).coerceAtLeast(0)
+                "R${step.roundIndex}/${step.totalRounds}  •  ${lastTelemetry.formattedPace} /500m  •  $spmText spm  •  noch ${RowingTelemetry.formatDistance(remM)}  •  $elapsedToShow$wattsSuffix"
+            }
+            else ->
+                "${lastTelemetry.formattedPace} /500m  •  $spmText spm  •  $distToShow  •  $elapsedToShow$wattsSuffix"
+        }
+
+        val showGhostInMini = lastGhostDelta != null &&
+            (program == null || program.isCompleted || program.currentStep is ProgramStep.RowingDistance)
+        val ghost = if (showGhostInMini) lastGhostDelta else null
         val ghostSuffix = ghost?.let { "  •  ${it.formattedCompact}" } ?: ""
         val ghostColor = when {
             ghost == null -> 0
@@ -507,8 +552,11 @@ class FloatingOverlayController(
             lastMiniKey = miniKey
         }
 
-        // Update slim goal progress bar
-        val progress = lastGoal.progressFraction(distMeters, elapsedSec)
+        // Update slim progress bar (program step progress takes precedence over free goal)
+        val progress = when {
+            program != null -> program.stepProgressFraction
+            else -> lastGoal.progressFraction(distMeters, elapsedSec)
+        }
         val showProgress = progress != null
         if (appliedProgressVisible != showProgress) {
             progressTrack?.visibility = if (showProgress) View.VISIBLE else View.GONE
@@ -527,11 +575,22 @@ class FloatingOverlayController(
                 }
                 appliedProgressPermille = permille
             }
-            val barColor = if (permille >= 1000) COLOR_ACTIVE_GREEN else COLOR_CONNECTED_SKY
+            val barColor = when {
+                permille >= 1000 -> COLOR_ACTIVE_GREEN
+                program?.currentStep is ProgramStep.OffRowerStation -> COLOR_VIOLET
+                program?.currentStep is ProgramStep.TimedRest -> COLOR_AMBER
+                else -> COLOR_CONNECTED_SKY
+            }
             if (barColor != appliedProgressColor) {
                 progressFillDrawable?.setColor(barColor)
                 appliedProgressColor = barColor
             }
+        }
+
+        val showNextStepBtn = program != null && !program.isCompleted
+        if (lastNextStepVisible != showNextStepBtn) {
+            nextStepButton?.visibility = if (showNextStepBtn) View.VISIBLE else View.GONE
+            lastNextStepVisible = showNextStepBtn
         }
 
         if (isExpanded) {
@@ -544,7 +603,11 @@ class FloatingOverlayController(
                 RecordingState.Idle -> lastTelemetry.strokeCount
             }
             val hrPart = lastTelemetry.heartRateBpm?.let { "  •  $it bpm" } ?: ""
-            val remPart = lastGoal.remainingSummary(distMeters, elapsedSec)?.let { "  •  $it" } ?: ""
+            val remPart = if (program != null) {
+                "  •  ${program.plan.titleWithScale} ($distToShow)"
+            } else {
+                lastGoal.remainingSummary(distMeters, elapsedSec)?.let { "  •  $it" } ?: ""
+            }
             val extraText = "${lastTelemetry.watts} W  •  $caloriesToShow kcal  •  $strokesToShow Züge$hrPart$remPart"
             if (extraText != lastExtraText) {
                 extraMetricsView?.text = extraText
@@ -656,6 +719,7 @@ class FloatingOverlayController(
         appliedProgressColor = 0
         lastMiniKey = null
         lastExtraText = null
+        lastNextStepVisible = null
         lastPauseVisible = null
         lastPauseText = null
         lastPauseColor = 0
@@ -741,6 +805,7 @@ class FloatingOverlayController(
         private val COLOR_CONNECTED_SKY = Color.parseColor("#38BDF8")
         private val COLOR_SKY = Color.parseColor("#0EA5E9")
         private val COLOR_AMBER = Color.parseColor("#F59E0B")
+        private val COLOR_VIOLET = Color.parseColor("#A855F7")
         private val COLOR_DISCONNECTED = Color.parseColor("#EF4444")
         private val COLOR_SLATE_CHIP = Color.parseColor("#334155")
         private val COLOR_CLOSE_CHIP = Color.parseColor("#7F1D1D")

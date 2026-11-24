@@ -85,6 +85,10 @@ import com.waterrower.tracker.model.ConnectionState
 import com.waterrower.tracker.model.GhostDelta
 import com.waterrower.tracker.model.GhostReference
 import com.waterrower.tracker.model.PaceZone
+import com.waterrower.tracker.model.ProgramPreset
+import com.waterrower.tracker.model.ProgramProgressState
+import com.waterrower.tracker.model.ProgramScale
+import com.waterrower.tracker.model.ProgramStep
 import com.waterrower.tracker.model.RowingTelemetry
 import com.waterrower.tracker.model.ScannedDevice
 import com.waterrower.tracker.model.WorkoutGoal
@@ -106,6 +110,7 @@ fun DashboardScreen(
     isSimulatorMode: Boolean,
     settings: OverlaySettings,
     activeGoal: WorkoutGoal,
+    activeProgram: ProgramProgressState?,
     ghostReference: GhostReference?,
     ghostDelta: GhostDelta?,
     recentWorkouts: List<WorkoutEntity>,
@@ -120,6 +125,8 @@ fun DashboardScreen(
     onTogglePause: () -> Unit,
     onStopAndSave: () -> Unit,
     onUpdateGoal: (WorkoutGoal) -> Unit,
+    onSelectProgram: (ProgramPreset?, ProgramScale) -> Unit,
+    onAdvanceProgramStep: () -> Unit,
     onSelectGhostWorkout: (String?) -> Unit,
     onOpenSettings: () -> Unit,
 ) {
@@ -141,11 +148,18 @@ fun DashboardScreen(
     if (showGoalDialog) {
         GoalAndGhostDialog(
             initialGoal = activeGoal,
+            initialPreset = activeProgram?.plan?.preset,
+            initialScale = activeProgram?.plan?.scale ?: ProgramScale.MEDIUM,
             initialGhostId = ghostReference?.workoutId,
             recentWorkouts = recentWorkouts,
             onDismiss = { showGoalDialog = false },
-            onApply = { newGoal, ghostId ->
+            onApply = { newGoal, preset, scale, ghostId ->
                 onUpdateGoal(newGoal)
+                if (preset != activeProgram?.plan?.preset ||
+                    (preset != null && scale != activeProgram?.plan?.scale)
+                ) {
+                    onSelectProgram(preset, scale)
+                }
                 if (ghostId != ghostReference?.workoutId) {
                     onSelectGhostWorkout(ghostId)
                 }
@@ -168,7 +182,7 @@ fun DashboardScreen(
             recordingState = recordingState,
             isOverlayVisible = isOverlayVisible,
             isSimulatorMode = isSimulatorMode,
-            hasActiveGoalOrGhost = activeGoal.hasAnyTarget || ghostReference != null,
+            hasActiveGoalOrGhost = activeGoal.hasAnyTarget || activeProgram != null || ghostReference != null,
             lastDeviceAddress = settings.lastDeviceAddress,
             lastDeviceName = settings.lastDeviceName,
             onStartScan = onStartScan,
@@ -285,18 +299,21 @@ fun DashboardScreen(
         }
         val spmFormatted = String.format(Locale.US, "%.1f", telemetry.strokeRateSpm)
 
-        // Active Goal & Ghost Progress Banner (shown only when a goal or ghost is configured)
-        AnimatedVisibility(visible = activeGoal.hasAnyTarget || ghostReference != null) {
+        // Active Program, Goal & Ghost Banner (compact, shown only when configured)
+        AnimatedVisibility(visible = activeGoal.hasAnyTarget || activeProgram != null || ghostReference != null) {
             ActiveGoalAndGhostCard(
                 goal = activeGoal,
+                program = activeProgram,
                 ghostReference = ghostReference,
                 ghostDelta = ghostDelta,
                 distanceMeters = liveDistanceMeters,
                 elapsedSeconds = liveElapsedSeconds,
                 currentPaceSec = telemetry.paceSecondsPer500m,
                 onEdit = { showGoalDialog = true },
+                onAdvanceProgramStep = onAdvanceProgramStep,
                 onClearAll = {
                     onUpdateGoal(WorkoutGoal())
+                    onSelectProgram(null, ProgramScale.MEDIUM)
                     onSelectGhostWorkout(null)
                 },
             )
@@ -691,13 +708,13 @@ private fun CockpitControlCard(
                     FilledTonalButton(onClick = onOpenGoalDialog) {
                         Icon(Icons.Rounded.Flag, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(6.dp))
-                        Text("Ziel / Ghost")
+                        Text("Ziel / Programm")
                     }
                 } else {
                     OutlinedButton(onClick = onOpenGoalDialog) {
                         Icon(Icons.Rounded.Flag, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(6.dp))
-                        Text("Ziel / Ghost")
+                        Text("Ziel / Programm")
                     }
                 }
 
@@ -740,20 +757,32 @@ private fun CockpitControlCard(
 @Composable
 private fun ActiveGoalAndGhostCard(
     goal: WorkoutGoal,
+    program: ProgramProgressState?,
     ghostReference: GhostReference?,
     ghostDelta: GhostDelta?,
     distanceMeters: Int,
     elapsedSeconds: Int,
     currentPaceSec: Int,
     onEdit: () -> Unit,
+    onAdvanceProgramStep: () -> Unit,
     onClearAll: () -> Unit,
 ) {
     val colorScheme = MaterialTheme.colorScheme
     val rowingColors = LocalRowingColors.current
-    val progress = goal.progressFraction(distanceMeters, elapsedSeconds)
-    val completed = goal.isCompleted(distanceMeters, elapsedSeconds)
+    val goalProgress = goal.progressFraction(distanceMeters, elapsedSeconds)
+    val goalCompleted = goal.isCompleted(distanceMeters, elapsedSeconds)
     val remaining = goal.remainingSummary(distanceMeters, elapsedSeconds)
     val paceZone = goal.evaluatePaceZone(currentPaceSec)
+
+    val progress = program?.stepProgressFraction ?: goalProgress
+    val isCompleted = program?.isCompleted == true || (program == null && goalCompleted)
+    val programAccent = when {
+        program == null -> colorScheme.primary
+        program.isCompleted -> rowingColors.active
+        program.currentStep is ProgramStep.TimedRest -> rowingColors.warning
+        program.currentStep is ProgramStep.OffRowerStation -> colorScheme.tertiary
+        else -> colorScheme.primary
+    }
 
     Card(
         onClick = onEdit,
@@ -762,7 +791,9 @@ private fun ActiveGoalAndGhostCard(
         border = BorderStroke(
             1.dp,
             when {
-                completed -> rowingColors.active.copy(alpha = 0.65f)
+                isCompleted -> rowingColors.active.copy(alpha = 0.65f)
+                program?.currentStep is ProgramStep.TimedRest -> rowingColors.warning.copy(alpha = 0.6f)
+                program?.currentStep is ProgramStep.OffRowerStation -> colorScheme.tertiary.copy(alpha = 0.6f)
                 paceZone == PaceZone.ON_TARGET -> rowingColors.active.copy(alpha = 0.55f)
                 paceZone == PaceZone.SLOWER -> rowingColors.warning.copy(alpha = 0.55f)
                 else -> colorScheme.outlineVariant.copy(alpha = 0.55f)
@@ -784,6 +815,53 @@ private fun ActiveGoalAndGhostCard(
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
+                    if (program != null) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Flag,
+                                contentDescription = null,
+                                tint = programAccent,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Text(
+                                text = program.plan.titleWithScale,
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                        }
+
+                        val stepLabel = if (program.isCompleted) {
+                            "✓ Fertig"
+                        } else {
+                            when (val step = program.currentStep) {
+                                is ProgramStep.RowingDistance -> {
+                                    val remM = (step.targetMeters - program.stepDistanceMeters).coerceAtLeast(0)
+                                    "R${step.roundIndex}/${step.totalRounds} • noch ${RowingTelemetry.formatDistance(remM)}"
+                                }
+                                is ProgramStep.TimedRest ->
+                                    "Pause ${RowingTelemetry.formatDuration(program.restRemainingSeconds)} • danach ${step.nextDescription}"
+                                is ProgramStep.OffRowerStation ->
+                                    "R${step.roundIndex}/${step.totalRounds}: ${step.exerciseLabel}"
+                            }
+                        }
+
+                        Surface(
+                            color = programAccent.copy(alpha = 0.16f),
+                            contentColor = programAccent,
+                            shape = RoundedCornerShape(999.dp),
+                        ) {
+                            Text(
+                                text = stepLabel,
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp),
+                            )
+                        }
+                    }
+
                     if (goal.hasAnyTarget) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -792,7 +870,7 @@ private fun ActiveGoalAndGhostCard(
                             Icon(
                                 imageVector = Icons.Rounded.Flag,
                                 contentDescription = null,
-                                tint = if (completed) rowingColors.active else colorScheme.primary,
+                                tint = if (goalCompleted) rowingColors.active else colorScheme.primary,
                                 modifier = Modifier.size(18.dp),
                             )
                             Text(
@@ -803,10 +881,10 @@ private fun ActiveGoalAndGhostCard(
                         }
                     }
 
-                    if (remaining != null) {
+                    if (program == null && remaining != null) {
                         Surface(
-                            color = if (completed) colorScheme.secondaryContainer else colorScheme.primaryContainer,
-                            contentColor = if (completed) colorScheme.onSecondaryContainer else colorScheme.onPrimaryContainer,
+                            color = if (goalCompleted) colorScheme.secondaryContainer else colorScheme.primaryContainer,
+                            contentColor = if (goalCompleted) colorScheme.onSecondaryContainer else colorScheme.onPrimaryContainer,
                             shape = RoundedCornerShape(999.dp),
                         ) {
                             Text(
@@ -866,16 +944,23 @@ private fun ActiveGoalAndGhostCard(
                     }
                 }
 
-                IconButton(
-                    onClick = onClearAll,
-                    modifier = Modifier.size(32.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Close,
-                        contentDescription = "Ziel & Ghost entfernen",
-                        tint = colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(18.dp),
-                    )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (program != null && !program.isCompleted) {
+                        TextButton(onClick = onAdvanceProgramStep) {
+                            Text("Nächster")
+                        }
+                    }
+                    IconButton(
+                        onClick = onClearAll,
+                        modifier = Modifier.size(32.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Close,
+                            contentDescription = "Ziel, Programm & Ghost entfernen",
+                            tint = colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
                 }
             }
 
@@ -890,7 +975,7 @@ private fun ActiveGoalAndGhostCard(
                         modifier = Modifier
                             .weight(1f)
                             .clip(RoundedCornerShape(999.dp)),
-                        color = if (completed) rowingColors.active else colorScheme.primary,
+                        color = if (program != null) programAccent else if (isCompleted) rowingColors.active else colorScheme.primary,
                         trackColor = colorScheme.surfaceContainerHighest,
                         strokeCap = StrokeCap.Round,
                     )
@@ -898,7 +983,7 @@ private fun ActiveGoalAndGhostCard(
                         text = "${(progress * 100f).roundToInt()}%",
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.SemiBold,
-                        color = if (completed) rowingColors.active else colorScheme.onSurfaceVariant,
+                        color = if (isCompleted) rowingColors.active else colorScheme.onSurfaceVariant,
                     )
                 }
             }
@@ -910,13 +995,17 @@ private fun ActiveGoalAndGhostCard(
 @Composable
 private fun GoalAndGhostDialog(
     initialGoal: WorkoutGoal,
+    initialPreset: ProgramPreset?,
+    initialScale: ProgramScale,
     initialGhostId: String?,
     recentWorkouts: List<WorkoutEntity>,
     onDismiss: () -> Unit,
-    onApply: (WorkoutGoal, String?) -> Unit,
+    onApply: (WorkoutGoal, ProgramPreset?, ProgramScale, String?) -> Unit,
 ) {
-    var distTarget by remember { mutableStateOf(initialGoal.distanceTargetMeters) }
-    var durTarget by remember { mutableStateOf(initialGoal.durationTargetSeconds) }
+    var selectedPreset by remember { mutableStateOf(initialPreset) }
+    var selectedScale by remember { mutableStateOf(initialScale) }
+    var distTarget by remember { mutableStateOf(if (initialPreset != null) null else initialGoal.distanceTargetMeters) }
+    var durTarget by remember { mutableStateOf(if (initialPreset != null) null else initialGoal.durationTargetSeconds) }
     var paceTarget by remember { mutableStateOf(initialGoal.targetPaceSecPer500m) }
     var selectedGhostId by remember { mutableStateOf(initialGhostId) }
 
@@ -928,7 +1017,7 @@ private fun GoalAndGhostDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = { Icon(Icons.Rounded.Flag, contentDescription = null) },
-        title = { Text("Trainingsziel & Ghost-Racer") },
+        title = { Text("Ziel, Programm & Ghost") },
         text = {
             Column(
                 modifier = Modifier
@@ -936,7 +1025,70 @@ private fun GoalAndGhostDialog(
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
-                // 1. Distance target
+                // 1. Curated Programs (Intervals & Hybrid Row + 16 kg KB/Mat) with Length Scaling
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        "Programm (Intervall & Hybrid)",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        FilterChip(
+                            selected = selectedPreset == null,
+                            onClick = { selectedPreset = null },
+                            label = { Text("Aus") },
+                        )
+                        ProgramPreset.entries.forEach { preset ->
+                            FilterChip(
+                                selected = selectedPreset == preset,
+                                onClick = {
+                                    selectedPreset = preset
+                                    distTarget = null
+                                    durTarget = null
+                                },
+                                label = { Text(preset.title) },
+                            )
+                        }
+                    }
+
+                    if (selectedPreset != null) {
+                        val preview = remember(selectedPreset, selectedScale) {
+                            selectedPreset!!.buildPlan(selectedScale)
+                        }
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            ProgramScale.entries.forEach { scale ->
+                                FilterChip(
+                                    selected = selectedScale == scale,
+                                    onClick = { selectedScale = scale },
+                                    label = { Text(scale.label) },
+                                )
+                            }
+                        }
+                        Text(
+                            text = "${preview.detailSummary} • ca. ${preview.estimatedMinutes} Min.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.Medium,
+                        )
+                        if (selectedPreset!!.isHybrid) {
+                            Text(
+                                text = "Nach der Übung einfach wieder ziehen – das Overlay startet automatisch die nächste Runde.",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+
+                HorizontalDivider()
+
+                // 2. Distance target (free workout)
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text("Distanz-Ziel", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                     FlowRow(
@@ -945,10 +1097,13 @@ private fun GoalAndGhostDialog(
                     ) {
                         listOf(null, 2000, 5000, 10000).forEach { meters ->
                             FilterChip(
-                                selected = distTarget == meters,
+                                selected = distTarget == meters && selectedPreset == null,
                                 onClick = {
                                     distTarget = meters
-                                    if (meters != null) durTarget = null
+                                    if (meters != null) {
+                                        durTarget = null
+                                        selectedPreset = null
+                                    }
                                 },
                                 label = { Text(meters?.let { RowingTelemetry.formatDistance(it) } ?: "Aus") },
                             )
@@ -963,7 +1118,7 @@ private fun GoalAndGhostDialog(
                     }
                 }
 
-                // 2. Duration target
+                // 3. Duration target (free workout)
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text("Zeit-Ziel", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                     FlowRow(
@@ -972,10 +1127,13 @@ private fun GoalAndGhostDialog(
                     ) {
                         listOf(null, 20 * 60, 30 * 60, 45 * 60).forEach { secs ->
                             FilterChip(
-                                selected = durTarget == secs,
+                                selected = durTarget == secs && selectedPreset == null,
                                 onClick = {
                                     durTarget = secs
-                                    if (secs != null) distTarget = null
+                                    if (secs != null) {
+                                        distTarget = null
+                                        selectedPreset = null
+                                    }
                                 },
                                 label = { Text(secs?.let { "${it / 60} Min" } ?: "Aus") },
                             )
@@ -990,7 +1148,7 @@ private fun GoalAndGhostDialog(
                     }
                 }
 
-                // 3. Target Pace (/500m)
+                // 4. Target Pace (/500m)
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(
                         "Ziel-Pace (/500m, ±3 s)",
@@ -1020,7 +1178,7 @@ private fun GoalAndGhostDialog(
 
                 HorizontalDivider()
 
-                // 4. Ghost Racer
+                // 5. Ghost Racer
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(
                         "Ghost-Racer (gegen frühere Einheit)",
@@ -1062,10 +1220,12 @@ private fun GoalAndGhostDialog(
                 onClick = {
                     onApply(
                         WorkoutGoal(
-                            distanceTargetMeters = distTarget,
-                            durationTargetSeconds = durTarget,
+                            distanceTargetMeters = if (selectedPreset != null) null else distTarget,
+                            durationTargetSeconds = if (selectedPreset != null) null else durTarget,
                             targetPaceSecPer500m = paceTarget,
                         ),
+                        selectedPreset,
+                        selectedScale,
                         selectedGhostId,
                     )
                 },

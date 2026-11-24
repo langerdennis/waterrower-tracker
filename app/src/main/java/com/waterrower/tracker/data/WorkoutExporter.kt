@@ -91,6 +91,7 @@ object WorkoutExporter {
         val avgHr = node.optNullableInt("avgHeartRateBpm")?.takeIf { it > 0 }
         val isSimulated = (node["isSimulated"] as? Boolean) ?: false
         val syncedAt = node.optNullableLong("syncedAtEpochMs")
+        val programSummary = (node["programSummary"] as? String)?.trim()?.takeIf { it.isNotEmpty() }
 
         val sampleNodes = (node["samples"] as? List<*>).orEmpty()
         val samples = sampleNodes.mapNotNull { raw ->
@@ -122,6 +123,7 @@ object WorkoutExporter {
                 avgHeartRateBpm = avgHr,
                 isSimulated = isSimulated,
                 syncedAtEpochMs = syncedAt,
+                programSummary = programSummary,
             ),
             samples = samples,
         )
@@ -148,6 +150,8 @@ object WorkoutExporter {
         sb.appendLine("${inner}\"totalCalories\": ${workout.totalCalories},")
         sb.appendLine("${inner}\"avgHeartRateBpm\": ${workout.avgHeartRateBpm ?: "null"},")
         sb.appendLine("${inner}\"isSimulated\": ${workout.isSimulated},")
+        val progVal = workout.programSummary?.let { "\"${escapeJson(it)}\"" } ?: "null"
+        sb.appendLine("${inner}\"programSummary\": $progVal,")
         if (samples.isEmpty()) {
             sb.appendLine("${inner}\"samples\": []")
         } else {

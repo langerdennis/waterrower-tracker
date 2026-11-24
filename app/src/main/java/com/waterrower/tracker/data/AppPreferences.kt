@@ -11,6 +11,7 @@ data class OverlaySettings(
     val showWattsInMini: Boolean = false,
     val autoStartRecording: Boolean = true,
     val autoFinishIdleMinutes: Int = AppPreferences.DEFAULT_AUTO_FINISH_MINUTES,
+    val goalSoundEnabled: Boolean = true,
     val lastDeviceAddress: String? = null,
     val lastDeviceName: String? = null,
     val overlayX: Int = AppPreferences.DEFAULT_OVERLAY_X,
@@ -29,6 +30,7 @@ class AppPreferences(context: Context) {
         showWattsInMini = prefs.getBoolean(KEY_SHOW_WATTS, false),
         autoStartRecording = prefs.getBoolean(KEY_AUTO_RECORD, true),
         autoFinishIdleMinutes = prefs.getInt(KEY_AUTO_FINISH_MIN, DEFAULT_AUTO_FINISH_MINUTES).coerceIn(0, 30),
+        goalSoundEnabled = prefs.getBoolean(KEY_GOAL_SOUND, true),
         lastDeviceAddress = prefs.getString(KEY_LAST_ADDR, null),
         lastDeviceName = prefs.getString(KEY_LAST_NAME, null),
         overlayX = prefs.getInt(KEY_OVERLAY_X, DEFAULT_OVERLAY_X),
@@ -61,6 +63,11 @@ class AppPreferences(context: Context) {
         val clamped = minutes.coerceIn(0, 30)
         prefs.edit().putInt(KEY_AUTO_FINISH_MIN, clamped).apply()
         _settings.value = _settings.value.copy(autoFinishIdleMinutes = clamped)
+    }
+
+    fun setGoalSoundEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_GOAL_SOUND, enabled).apply()
+        _settings.value = _settings.value.copy(goalSoundEnabled = enabled)
     }
 
     fun saveLastDevice(address: String, name: String) {
@@ -96,6 +103,7 @@ class AppPreferences(context: Context) {
         private const val KEY_SHOW_WATTS = "overlay_show_watts"
         private const val KEY_AUTO_RECORD = "auto_start_recording"
         private const val KEY_AUTO_FINISH_MIN = "auto_finish_idle_minutes"
+        private const val KEY_GOAL_SOUND = "goal_sound_enabled"
         private const val KEY_LAST_ADDR = "last_device_address"
         private const val KEY_LAST_NAME = "last_device_name"
         private const val KEY_OVERLAY_X = "overlay_x"

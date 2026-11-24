@@ -168,4 +168,111 @@ class WorkoutFeaturesTest {
         assertFalse(empty.hasAnyRecord)
         assertNull(empty.best2kPaceSec)
     }
+
+    @Test
+    fun programPreset_scalesRoundsAndMetersAcrossShortMediumLong() {
+        ProgramPreset.entries.forEach { preset ->
+            val shortPlan = preset.buildPlan(ProgramScale.SHORT)
+            val mediumPlan = preset.buildPlan(ProgramScale.MEDIUM)
+            val longPlan = preset.buildPlan(ProgramScale.LONG)
+
+            assertTrue(shortPlan.totalTargetMeters < mediumPlan.totalTargetMeters)
+            assertTrue(mediumPlan.totalTargetMeters < longPlan.totalTargetMeters)
+            assertTrue(shortPlan.steps.size < mediumPlan.steps.size)
+            assertTrue(mediumPlan.steps.size < longPlan.steps.size)
+            assertTrue(shortPlan.estimatedMinutes > 0)
+        }
+
+        val kbMedium = ProgramPreset.ROW_KB_SWING.buildPlan(ProgramScale.MEDIUM)
+        assertEquals(3000, kbMedium.totalTargetMeters)
+        assertEquals(12, kbMedium.steps.size) // 6 rowing legs + 6 KB stations
+        assertEquals(6, kbMedium.steps.count { it is ProgramStep.OffRowerStation })
+
+        val pyramidShort = ProgramPreset.PYRAMID.buildPlan(ProgramScale.SHORT)
+        assertEquals(2250, pyramidShort.totalTargetMeters) // 250+500+750+500+250
+        assertEquals(9, pyramidShort.steps.size) // 5 rowing + 4 rests
+    }
+
+    @Test
+    fun programRunner_drivesIntervalRestAndCompletionLifecycle() {
+        val plan = ProgramPreset.INTERVALS_500.buildPlan(ProgramScale.SHORT) // 4x 500m + 90s rest
+        val runner = ProgramRunner(flywheelGraceMs = 6_000L)
+        var t = 1_000_000L
+
+        val initial = runner.setPlan(plan, currentDistanceMeters = 0, nowMs = t)!!
+        assertTrue(initial.currentStep is ProgramStep.RowingDistance)
+        assertEquals(0f, initial.stepProgressFraction, 0.001f)
+
+        // Halfway through Round 1
+        t += 60_000L
+        val mid = runner.onTick(nowMs = t, totalDistanceMeters = 250, strokeRateSpm = 26f, isRecordingActive = true)
+        assertFalse(mid.playTone)
+        assertEquals(0.5f, mid.state!!.stepProgressFraction, 0.001f)
+
+        // Finish Round 1 -> transitions to TimedRest (90s) with cue tone
+        t += 60_000L
+        val enterRest = runner.onTick(nowMs = t, totalDistanceMeters = 500, strokeRateSpm = 26f, isRecordingActive = true)
+        assertTrue(enterRest.playTone)
+        assertNotNull(enterRest.cueMessage)
+        assertTrue(enterRest.state!!.currentStep is ProgramStep.TimedRest)
+        assertEquals(90, enterRest.state!!.restRemainingSeconds)
+        assertEquals(1, enterRest.state!!.completedRowingRounds)
+
+        // Flywheel coasts for 3 seconds (within 6s grace) -> must NOT skip rest
+        t += 3_000L
+        val coast = runner.onTick(nowMs = t, totalDistanceMeters = 512, strokeRateSpm = 14f, isRecordingActive = true)
+        assertFalse(coast.playTone)
+        assertTrue(coast.state!!.currentStep is ProgramStep.TimedRest)
+        assertEquals(87, coast.state!!.restRemainingSeconds)
+
+        // Rest timer finishes at 90s -> transitions cleanly to Round 2
+        t += 87_000L
+        val startR2 = runner.onTick(nowMs = t, totalDistanceMeters = 512, strokeRateSpm = 0f, isRecordingActive = true)
+        assertTrue(startR2.playTone)
+        val r2Step = startR2.state!!.currentStep as ProgramStep.RowingDistance
+        assertEquals(2, r2Step.roundIndex)
+        assertEquals(0, startR2.state!!.stepDistanceMeters)
+        assertEquals("500m Intervalle (Kurz, 1/4 Runden)", startR2.state!!.storageSummary())
+    }
+
+    @Test
+    fun programRunner_hybridOffRowerStationRespectsFlywheelGraceAndAutoAdvancesOnNextPull() {
+        val plan = ProgramPreset.ROW_KB_SWING.buildPlan(ProgramScale.SHORT) // 4 rounds
+        val runner = ProgramRunner(flywheelGraceMs = 6_000L)
+        var t = 2_000_000L
+        runner.setPlan(plan, currentDistanceMeters = 0, nowMs = t)
+
+        // Complete Round 1 rowing (500m) -> enters OffRowerStation (15x 16 kg KB Swings)
+        t += 120_000L
+        val enterKb = runner.onTick(nowMs = t, totalDistanceMeters = 500, strokeRateSpm = 25f, isRecordingActive = true)
+        assertTrue(enterKb.playTone)
+        assertTrue(enterKb.state!!.currentStep is ProgramStep.OffRowerStation)
+
+        // Within 6s grace window, flywheel still coasts +8m -> MUST stay on KB station
+        t += 4_000L
+        val stillKb = runner.onTick(nowMs = t, totalDistanceMeters = 508, strokeRateSpm = 10f, isRecordingActive = true)
+        assertTrue(stillKb.state!!.currentStep is ProgramStep.OffRowerStation)
+
+        // Flywheel comes to rest while user does KB swings (20s later)
+        t += 20_000L
+        val doingSwings = runner.onTick(nowMs = t, totalDistanceMeters = 508, strokeRateSpm = 0f, isRecordingActive = true)
+        assertTrue(doingSwings.state!!.currentStep is ProgramStep.OffRowerStation)
+
+        // User sits back down and pulls +6m -> auto-advances to Round 2 rowing!
+        t += 3_000L
+        val backOnRower = runner.onTick(nowMs = t, totalDistanceMeters = 514, strokeRateSpm = 22f, isRecordingActive = true)
+        assertTrue(backOnRower.playTone)
+        val r2 = backOnRower.state!!.currentStep as ProgramStep.RowingDistance
+        assertEquals(2, r2.roundIndex)
+
+        // Advance manually through the remaining steps to verify completion
+        var latest = backOnRower.state!!
+        while (!latest.isCompleted) {
+            val res = runner.advanceStepManually(nowMs = t, totalDistanceMeters = 2000)
+            latest = res.state!!
+        }
+        assertTrue(latest.isCompleted)
+        assertEquals(1f, latest.stepProgressFraction, 0.001f)
+        assertEquals("Row & KB Swing (Kurz)", latest.storageSummary())
+    }
 }

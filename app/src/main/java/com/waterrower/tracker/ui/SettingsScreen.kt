@@ -90,6 +90,7 @@ fun SettingsScreen(
     onShowWattsInMiniChange: (Boolean) -> Unit,
     onAutoStartChange: (Boolean) -> Unit,
     onAutoFinishMinutesChange: (Int) -> Unit,
+    onGoalSoundChange: (Boolean) -> Unit,
     onResetOverlayPosition: () -> Unit,
     onExportBackup: () -> Unit,
     onImportBackup: () -> Unit,
@@ -282,6 +283,13 @@ fun SettingsScreen(
                         subtitle = "Beginnt automatisch bei echter Ruderbewegung",
                         checked = settings.autoStartRecording,
                         onCheckedChange = onAutoStartChange,
+                    )
+
+                    SettingToggleRow(
+                        title = "Signalton bei Ziel- & Rundenende",
+                        subtitle = "Kurzer Ton beim Erreichen von Zielen und Programm-Wechseln",
+                        checked = settings.goalSoundEnabled,
+                        onCheckedChange = onGoalSoundChange,
                     )
 
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
