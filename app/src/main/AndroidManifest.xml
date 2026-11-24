@@ -30,9 +30,18 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
+    <!-- Optional local Android Health Connect write permissions (real workouts only) -->
+    <uses-permission android:name="android.permission.health.WRITE_EXERCISE" />
+    <uses-permission android:name="android.permission.health.WRITE_DISTANCE" />
+    <uses-permission android:name="android.permission.health.WRITE_TOTAL_CALORIES_BURNED" />
+
     <uses-feature
         android:name="android.hardware.bluetooth_le"
         android:required="false" />
+
+    <queries>
+        <package android:name="com.google.android.apps.healthdata" />
+    </queries>
 
     <application
         android:name=".WaterRowerApp"
@@ -55,6 +64,28 @@
             </intent-filter>
         </activity>
 
+        <!-- Mandatory Health Connect permissions rationale (Android <= 13) -->
+        <activity
+            android:name=".health.HealthConnectRationaleActivity"
+            android:exported="true"
+            android:theme="@style/Theme.WaterRowerTracker">
+            <intent-filter>
+                <action android:name="androidx.health.ACTION_SHOW_PERMISSIONS_RATIONALE" />
+            </intent-filter>
+        </activity>
+
+        <!-- Mandatory Health Connect permissions rationale alias (Android 14+) -->
+        <activity-alias
+            android:name=".ViewPermissionUsageActivity"
+            android:exported="true"
+            android:permission="android.permission.START_VIEW_PERMISSION_USAGE"
+            android:targetActivity=".health.HealthConnectRationaleActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW_PERMISSION_USAGE" />
+                <category android:name="android.intent.category.HEALTH_PERMISSIONS" />
+            </intent-filter>
+        </activity-alias>
+
         <service
             android:name=".service.RowingForegroundService"
             android:exported="false"
@@ -71,4 +102,5 @@
         </provider>
 
     </application>
+
 </manifest>

@@ -92,8 +92,9 @@ class RowingForegroundService : LifecycleService() {
                 hub.activeGoal,
                 hub.ghostDelta,
                 hub.activeProgram,
-            ) { goal, ghost, program ->
-                Triple(goal, ghost, program)
+                hub.batteryPercent,
+            ) { goal, ghost, program, battery ->
+                TrainingExtras(goal, ghost, program, battery)
             }
             combine(
                 hub.telemetry,
@@ -110,9 +111,10 @@ class RowingForegroundService : LifecycleService() {
                     recording = rec,
                     settings = settings,
                     overlayVisible = extras.first,
-                    goal = extras.second.first,
-                    ghostDelta = extras.second.second,
-                    program = extras.second.third,
+                    goal = extras.second.goal,
+                    ghostDelta = extras.second.ghost,
+                    program = extras.second.program,
+                    batteryPercent = extras.second.batteryPercent,
                 )
             }.collect { snap ->
                 val isConnected = snap.connection is ConnectionState.Connected
@@ -138,6 +140,7 @@ class RowingForegroundService : LifecycleService() {
                         goal = snap.goal,
                         ghostDelta = snap.ghostDelta,
                         program = snap.program,
+                        batteryPercent = snap.batteryPercent,
                     )
                 }
                 checkGoalCompletionCue(snap)
@@ -439,6 +442,13 @@ class RowingForegroundService : LifecycleService() {
         }
     }
 
+    private data class TrainingExtras(
+        val goal: WorkoutGoal,
+        val ghost: GhostDelta?,
+        val program: ProgramProgressState?,
+        val batteryPercent: Int?,
+    )
+
     private data class OverlaySnapshot(
         val telemetry: RowingTelemetry,
         val connection: ConnectionState,
@@ -448,6 +458,7 @@ class RowingForegroundService : LifecycleService() {
         val goal: WorkoutGoal,
         val ghostDelta: GhostDelta?,
         val program: ProgramProgressState?,
+        val batteryPercent: Int?,
     )
 
     companion object {

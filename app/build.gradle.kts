@@ -7,7 +7,7 @@ plugins {
 
 android {
     namespace = "com.waterrower.tracker"
-    compileSdk = 35
+    compileSdk = 36
 
     val envVersionCode = System.getenv("APP_VERSION_CODE")?.toIntOrNull() ?: 1
     val envVersionName = System.getenv("APP_VERSION_NAME")?.takeIf { it.isNotBlank() } ?: "0.1.0"
@@ -94,6 +94,7 @@ dependencies {
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
     ksp(libs.androidx.room.compiler)
+    implementation(libs.androidx.health.connect)
 
     implementation(libs.kotlinx.coroutines.android)
 

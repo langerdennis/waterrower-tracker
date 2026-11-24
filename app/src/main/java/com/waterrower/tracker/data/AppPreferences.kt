@@ -30,6 +30,7 @@ data class OverlaySettings(
     val autoReconnectOnStart: Boolean = true,
     val autoShowOverlayOnConnect: Boolean = true,
     val weeklyGoalMeters: Int = 0,
+    val healthConnectSyncEnabled: Boolean = false,
     val lastDeviceAddress: String? = null,
     val lastDeviceName: String? = null,
     val overlayX: Int = AppPreferences.DEFAULT_OVERLAY_X,
@@ -55,6 +56,7 @@ class AppPreferences(context: Context) {
         autoReconnectOnStart = prefs.getBoolean(KEY_AUTO_RECONNECT, true),
         autoShowOverlayOnConnect = prefs.getBoolean(KEY_AUTO_SHOW_OVERLAY, true),
         weeklyGoalMeters = prefs.getInt(KEY_WEEKLY_GOAL_METERS, 0).coerceIn(0, 200_000),
+        healthConnectSyncEnabled = prefs.getBoolean(KEY_HEALTH_CONNECT_SYNC, false),
         lastDeviceAddress = prefs.getString(KEY_LAST_ADDR, null),
         lastDeviceName = prefs.getString(KEY_LAST_NAME, null),
         overlayX = prefs.getInt(KEY_OVERLAY_X, DEFAULT_OVERLAY_X),
@@ -125,6 +127,11 @@ class AppPreferences(context: Context) {
         _settings.value = _settings.value.copy(weeklyGoalMeters = clamped)
     }
 
+    fun setHealthConnectSyncEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_HEALTH_CONNECT_SYNC, enabled).apply()
+        _settings.value = _settings.value.copy(healthConnectSyncEnabled = enabled)
+    }
+
     fun saveLastDevice(address: String, name: String) {
         prefs.edit()
             .putString(KEY_LAST_ADDR, address)
@@ -166,6 +173,7 @@ class AppPreferences(context: Context) {
         private const val KEY_AUTO_RECONNECT = "auto_reconnect_on_start"
         private const val KEY_AUTO_SHOW_OVERLAY = "auto_show_overlay_on_connect"
         private const val KEY_WEEKLY_GOAL_METERS = "weekly_goal_meters"
+        private const val KEY_HEALTH_CONNECT_SYNC = "health_connect_sync_enabled"
         private const val KEY_LAST_ADDR = "last_device_address"
         private const val KEY_LAST_NAME = "last_device_name"
         private const val KEY_OVERLAY_X = "overlay_x"

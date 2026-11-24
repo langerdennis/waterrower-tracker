@@ -11,6 +11,7 @@ import com.waterrower.tracker.data.WorkoutDatabase
 import com.waterrower.tracker.data.WorkoutEntity
 import com.waterrower.tracker.data.WorkoutRecorder
 import com.waterrower.tracker.data.WorkoutSampleEntity
+import com.waterrower.tracker.health.HealthConnectSyncManager
 import com.waterrower.tracker.model.ActiveProgramPlan
 import com.waterrower.tracker.model.BleDiagnostics
 import com.waterrower.tracker.model.ConnectionState
@@ -62,6 +63,7 @@ class RowingSessionHub(
     private val database: WorkoutDatabase,
     private val preferences: AppPreferences,
 ) {
+    private val appContext = context.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val recorderLock = Any()
 
@@ -246,6 +248,7 @@ class RowingSessionHub(
                         }
                         database.workoutDao().saveWorkoutWithSamples(enriched.workout, enriched.samples)
                         _lastSavedWorkoutId.value = enriched.workout.id
+                        maybeAutoSyncHealthConnect(enriched.workout)
                         emitUiMessage(
                             "Workout nach Leerlauf automatisch gespeichert (${RowingTelemetry.formatDistance(enriched.workout.totalDistanceMeters)}).",
                         )
@@ -373,6 +376,7 @@ class RowingSessionHub(
             scope.launch {
                 database.workoutDao().saveWorkoutWithSamples(enriched.workout, enriched.samples)
                 _lastSavedWorkoutId.value = enriched.workout.id
+                maybeAutoSyncHealthConnect(enriched.workout)
             }
         }
     }
@@ -467,6 +471,47 @@ class RowingSessionHub(
         val imported = database.workoutDao().importNewWorkouts(items)
         val skipped = (items.size - imported).coerceAtLeast(0)
         return BackupImportSummary(importedCount = imported, skippedDuplicates = skipped)
+    }
+
+    suspend fun syncWorkoutToHealthConnect(workout: WorkoutEntity): Result<Long> {
+        val result = HealthConnectSyncManager.syncWorkout(appContext, workout)
+        result.onSuccess { syncedAt ->
+            database.workoutDao().markWorkoutSynced(workout.id, syncedAt)
+        }
+        return result
+    }
+
+    suspend fun syncAllUnsyncedToHealthConnect(): Result<Int> {
+        val unsynced = database.workoutDao().getAllWorkoutsOnce().filter {
+            it.syncedAtEpochMs == null && HealthConnectSyncManager.shouldSyncWorkout(it)
+        }
+        if (unsynced.isEmpty()) return Result.success(0)
+        var syncedCount = 0
+        var lastFailure: Throwable? = null
+        for (w in unsynced) {
+            val res = syncWorkoutToHealthConnect(w)
+            if (res.isSuccess) {
+                syncedCount += 1
+            } else {
+                lastFailure = res.exceptionOrNull()
+                break
+            }
+        }
+        return if (syncedCount > 0 || lastFailure == null) {
+            Result.success(syncedCount)
+        } else {
+            Result.failure(lastFailure)
+        }
+    }
+
+    private suspend fun maybeAutoSyncHealthConnect(workout: WorkoutEntity) {
+        if (!preferences.settings.value.healthConnectSyncEnabled) return
+        if (!HealthConnectSyncManager.shouldSyncWorkout(workout)) return
+        syncWorkoutToHealthConnect(workout).onFailure { err ->
+            emitUiMessage(
+                "Health Connect Sync fehlgeschlagen: ${err.localizedMessage ?: "Berechtigung prüfen"}",
+            )
+        }
     }
 
     fun deleteWorkout(workoutId: String) {

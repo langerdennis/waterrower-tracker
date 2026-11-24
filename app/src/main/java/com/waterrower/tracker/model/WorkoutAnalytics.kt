@@ -2,6 +2,9 @@ package com.waterrower.tracker.model
 
 import com.waterrower.tracker.data.WorkoutEntity
 import com.waterrower.tracker.data.WorkoutSampleEntity
+import java.util.Calendar
+import java.util.Locale
+import java.util.TimeZone
 import kotlin.math.roundToInt
 
 data class Split500m(
@@ -30,6 +33,20 @@ data class PersonalBests(
             best2kPaceSec != null ||
             best5kPaceSec != null
 }
+
+data class WeeklyTrendBucket(
+    val weekStartEpochMs: Long,
+    val label: String,
+    val distanceMeters: Int,
+    val workoutCount: Int,
+    val isCurrentWeek: Boolean,
+)
+
+data class WeeklyTrendSummary(
+    val buckets: List<WeeklyTrendBucket> = emptyList(),
+    val activeWeekStreak: Int = 0,
+    val goalWeekStreak: Int = 0,
+)
 
 /**
  * Pure-Kotlin workout analytics computed on the fly from local Room records (zero schema changes).
@@ -163,5 +180,102 @@ object WorkoutAnalytics {
             best2kPaceSec = best2k,
             best5kPaceSec = best5k,
         )
+    }
+
+    /**
+     * Computes an N-week calendar-week (Monday-Sunday) distance trend plus active & weekly-goal
+     * streaks. If the current week has not met the threshold yet, the streak still counts
+     * consecutive weeks ending with the previous week so streaks never prematurely drop on Monday.
+     */
+    fun computeWeeklyTrend(
+        workouts: List<WorkoutEntity>,
+        weeklyGoalMeters: Int = 0,
+        weeks: Int = 8,
+        nowEpochMs: Long = System.currentTimeMillis(),
+        timeZone: TimeZone = TimeZone.getDefault(),
+    ): WeeklyTrendSummary {
+        val count = weeks.coerceAtLeast(1)
+        val currentWeekStart = startOfIsoWeekMs(nowEpochMs, timeZone)
+
+        // Group all workouts by their ISO Monday week start
+        val byWeek = HashMap<Long, Pair<Int, Int>>() // weekStart -> (meters, count)
+        for (w in workouts) {
+            val ws = startOfIsoWeekMs(w.startedAtEpochMs, timeZone)
+            val prev = byWeek[ws]
+            byWeek[ws] = if (prev == null) {
+                w.totalDistanceMeters to 1
+            } else {
+                (prev.first + w.totalDistanceMeters) to (prev.second + 1)
+            }
+        }
+
+        // Build chronological list of last N weeks ending with currentWeekStart
+        val cal = Calendar.getInstance(timeZone, Locale.GERMANY).apply {
+            firstDayOfWeek = Calendar.MONDAY
+            minimalDaysInFirstWeek = 4
+            timeInMillis = currentWeekStart
+            add(Calendar.WEEK_OF_YEAR, -(count - 1))
+        }
+        val buckets = ArrayList<WeeklyTrendBucket>(count)
+        for (i in 0 until count) {
+            val ws = cal.timeInMillis
+            val kw = cal.get(Calendar.WEEK_OF_YEAR)
+            val stats = byWeek[ws]
+            buckets += WeeklyTrendBucket(
+                weekStartEpochMs = ws,
+                label = "KW$kw",
+                distanceMeters = stats?.first ?: 0,
+                workoutCount = stats?.second ?: 0,
+                isCurrentWeek = i == count - 1,
+            )
+            cal.add(Calendar.WEEK_OF_YEAR, 1)
+        }
+
+        fun countStreak(predicate: (Pair<Int, Int>?) -> Boolean): Int {
+            val c = Calendar.getInstance(timeZone, Locale.GERMANY).apply {
+                firstDayOfWeek = Calendar.MONDAY
+                minimalDaysInFirstWeek = 4
+                timeInMillis = currentWeekStart
+            }
+            // If current week hasn't satisfied predicate yet, start checking from last week
+            if (!predicate(byWeek[c.timeInMillis])) {
+                c.add(Calendar.WEEK_OF_YEAR, -1)
+            }
+            var streak = 0
+            while (streak < 520 && predicate(byWeek[c.timeInMillis])) {
+                streak += 1
+                c.add(Calendar.WEEK_OF_YEAR, -1)
+            }
+            return streak
+        }
+
+        val activeStreak = countStreak { it != null && it.second > 0 }
+        val goalStreak = if (weeklyGoalMeters > 0) {
+            countStreak { it != null && it.first >= weeklyGoalMeters }
+        } else {
+            0
+        }
+
+        return WeeklyTrendSummary(
+            buckets = buckets,
+            activeWeekStreak = activeStreak,
+            goalWeekStreak = goalStreak,
+        )
+    }
+
+    private fun startOfIsoWeekMs(epochMs: Long, timeZone: TimeZone): Long {
+        val cal = Calendar.getInstance(timeZone, Locale.GERMANY).apply {
+            firstDayOfWeek = Calendar.MONDAY
+            minimalDaysInFirstWeek = 4
+            timeInMillis = epochMs
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }
+        val dayOfWeek = cal.get(Calendar.DAY_OF_WEEK)
+        val daysFromMonday = (dayOfWeek - Calendar.MONDAY + 7) % 7
+        cal.add(Calendar.DAY_OF_MONTH, -daysFromMonday)
+        return cal.timeInMillis
     }
 }

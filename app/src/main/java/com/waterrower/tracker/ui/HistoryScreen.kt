@@ -1,6 +1,7 @@
 package com.waterrower.tracker.ui
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -44,7 +45,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -52,6 +57,7 @@ import androidx.compose.ui.unit.dp
 import com.waterrower.tracker.data.WorkoutEntity
 import com.waterrower.tracker.model.PersonalBests
 import com.waterrower.tracker.model.RowingTelemetry
+import com.waterrower.tracker.model.WeeklyTrendSummary
 import com.waterrower.tracker.model.WorkoutAnalytics
 import com.waterrower.tracker.ui.theme.LocalRowingColors
 import java.text.SimpleDateFormat
@@ -97,6 +103,12 @@ fun HistoryScreen(
 
     val personalBests = remember(filteredWorkouts) {
         WorkoutAnalytics.computePersonalBests(filteredWorkouts)
+    }
+    val weeklyTrend = remember(filteredWorkouts, weeklyGoalMeters) {
+        WorkoutAnalytics.computeWeeklyTrend(
+            workouts = filteredWorkouts,
+            weeklyGoalMeters = weeklyGoalMeters,
+        )
     }
 
     val totalMeters = filteredWorkouts.sumOf { it.totalDistanceMeters }
@@ -187,6 +199,7 @@ fun HistoryScreen(
                 PersonalBestsBanner(
                     bests = personalBests,
                     weeklyGoalMeters = weeklyGoalMeters,
+                    weeklyTrend = weeklyTrend,
                 )
             }
 
@@ -356,6 +369,7 @@ fun HistoryScreen(
 private fun PersonalBestsBanner(
     bests: PersonalBests,
     weeklyGoalMeters: Int,
+    weeklyTrend: WeeklyTrendSummary,
 ) {
     val colorScheme = MaterialTheme.colorScheme
     val rowingColors = LocalRowingColors.current
@@ -368,23 +382,51 @@ private fun PersonalBestsBanner(
     ) {
         Column(
             modifier = Modifier.padding(horizontal = 18.dp, vertical = 14.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Row(
+                modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                Icon(
-                    imageVector = Icons.Rounded.EmojiEvents,
-                    contentDescription = null,
-                    tint = rowingColors.warning,
-                    modifier = Modifier.size(18.dp),
-                )
-                Text(
-                    text = "Woche & Bestleistungen",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.EmojiEvents,
+                        contentDescription = null,
+                        tint = rowingColors.warning,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Text(
+                        text = "Woche & Bestleistungen",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+
+                val streakLabel = when {
+                    weeklyGoalMeters > 0 && weeklyTrend.goalWeekStreak > 0 ->
+                        "${weeklyTrend.goalWeekStreak} Wo. im Ziel"
+                    weeklyTrend.activeWeekStreak > 0 ->
+                        "${weeklyTrend.activeWeekStreak} Wo. aktiv"
+                    else -> null
+                }
+                if (streakLabel != null) {
+                    Surface(
+                        color = rowingColors.active.copy(alpha = 0.16f),
+                        contentColor = rowingColors.active,
+                        shape = RoundedCornerShape(999.dp),
+                    ) {
+                        Text(
+                            text = "Streak: $streakLabel",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp),
+                        )
+                    }
+                }
             }
 
             if (weeklyGoalMeters > 0) {
@@ -428,6 +470,14 @@ private fun PersonalBestsBanner(
                 }
             }
 
+            // Compact 8-Week Volume Bar Chart
+            if (weeklyTrend.buckets.any { it.distanceMeters > 0 }) {
+                WeeklyTrendChart(
+                    trend = weeklyTrend,
+                    weeklyGoalMeters = weeklyGoalMeters,
+                )
+            }
+
             if (bests.hasAnyRecord) {
                 FlowRow(
                     modifier = Modifier.fillMaxWidth(),
@@ -465,6 +515,106 @@ private fun PersonalBestsBanner(
                         )
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun WeeklyTrendChart(
+    trend: WeeklyTrendSummary,
+    weeklyGoalMeters: Int,
+) {
+    val colorScheme = MaterialTheme.colorScheme
+    val rowingColors = LocalRowingColors.current
+    val buckets = trend.buckets
+    val maxDist = maxOf(
+        buckets.maxOfOrNull { it.distanceMeters } ?: 0,
+        weeklyGoalMeters,
+        1_000,
+    )
+
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "8-Wochen-Verlauf",
+                style = MaterialTheme.typography.labelSmall,
+                color = colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = "Max: ${RowingTelemetry.formatDistance(maxDist)}",
+                style = MaterialTheme.typography.labelSmall,
+                color = colorScheme.onSurfaceVariant,
+            )
+        }
+
+        val currentBarColor = colorScheme.primary
+        val reachedBarColor = rowingColors.active
+        val pastBarColor = colorScheme.primary.copy(alpha = 0.45f)
+        val emptyBarColor = colorScheme.surfaceContainerHighest
+        val goalLineColor = rowingColors.warning.copy(alpha = 0.75f)
+
+        Canvas(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(74.dp),
+        ) {
+            val slotW = size.width / buckets.size.coerceAtLeast(1)
+            val barW = (slotW * 0.56f).coerceAtLeast(8f)
+            val topPad = 6.dp.toPx()
+            val chartH = (size.height - topPad).coerceAtLeast(1f)
+            val corner = CornerRadius(6.dp.toPx(), 6.dp.toPx())
+
+            buckets.forEachIndexed { idx, bucket ->
+                val x = idx * slotW + (slotW - barW) / 2f
+                val frac = (bucket.distanceMeters.toFloat() / maxDist.toFloat()).coerceIn(0f, 1f)
+                val barH = if (bucket.distanceMeters > 0) {
+                    (chartH * frac).coerceAtLeast(4.dp.toPx())
+                } else {
+                    2.dp.toPx()
+                }
+                val y = size.height - barH
+                val color = when {
+                    bucket.distanceMeters == 0 -> emptyBarColor
+                    weeklyGoalMeters > 0 && bucket.distanceMeters >= weeklyGoalMeters -> reachedBarColor
+                    bucket.isCurrentWeek -> currentBarColor
+                    else -> pastBarColor
+                }
+                drawRoundRect(
+                    color = color,
+                    topLeft = Offset(x, y),
+                    size = Size(barW, barH),
+                    cornerRadius = corner,
+                )
+            }
+
+            if (weeklyGoalMeters > 0) {
+                val goalFrac = (weeklyGoalMeters.toFloat() / maxDist.toFloat()).coerceIn(0f, 1f)
+                val goalY = size.height - chartH * goalFrac
+                drawLine(
+                    color = goalLineColor,
+                    start = Offset(0f, goalY),
+                    end = Offset(size.width, goalY),
+                    strokeWidth = 1.5.dp.toPx(),
+                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 8f), 0f),
+                )
+            }
+        }
+
+        Row(modifier = Modifier.fillMaxWidth()) {
+            buckets.forEach { bucket ->
+                Text(
+                    text = bucket.label,
+                    modifier = Modifier.weight(1f),
+                    textAlign = TextAlign.Center,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = if (bucket.isCurrentWeek) FontWeight.Bold else FontWeight.Normal,
+                    color = if (bucket.isCurrentWeek) colorScheme.primary else colorScheme.onSurfaceVariant,
+                )
             }
         }
     }

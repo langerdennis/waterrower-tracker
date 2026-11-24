@@ -290,6 +290,92 @@ class WorkoutFeaturesTest {
         assertFalse(defaults.overlayPositionLocked)
         assertTrue(defaults.autoReconnectOnStart)
         assertTrue(defaults.autoShowOverlayOnConnect)
+        assertFalse(defaults.healthConnectSyncEnabled)
         assertEquals(0, defaults.weeklyGoalMeters)
+    }
+
+    @Test
+    fun workoutAnalytics_computesEightWeekTrendAndStreaks() {
+        val utc = java.util.TimeZone.getTimeZone("UTC")
+        // Wednesday 2026-05-13 12:00 UTC (ISO week KW20)
+        val cal = java.util.Calendar.getInstance(utc).apply {
+            set(2026, java.util.Calendar.MAY, 13, 12, 0, 0)
+            set(java.util.Calendar.MILLISECOND, 0)
+        }
+        val nowMs = cal.timeInMillis
+        val weekMs = 7L * 24L * 60L * 60L * 1_000L
+
+        fun mkWorkout(id: String, startMs: Long, meters: Int) = WorkoutEntity(
+            id = id,
+            startedAtEpochMs = startMs,
+            endedAtEpochMs = startMs + 600_000L,
+            durationSeconds = 600,
+            totalDistanceMeters = meters,
+            avgPaceSecPer500m = 125,
+            avgStrokeRate = 25f,
+            avgWatts = 180,
+            totalStrokes = 250,
+            totalCalories = 120,
+        )
+
+        // Workouts in: 1 week ago (6000m), 2 weeks ago (5500m), 3 weeks ago (3000m)
+        // Current week has 0m -> streak should still count back from last week!
+        val workouts = listOf(
+            mkWorkout("w1", nowMs - 1 * weekMs, 6_000),
+            mkWorkout("w2", nowMs - 2 * weekMs, 5_500),
+            mkWorkout("w3", nowMs - 3 * weekMs, 3_000),
+        )
+
+        val trend = WorkoutAnalytics.computeWeeklyTrend(
+            workouts = workouts,
+            weeklyGoalMeters = 5_000,
+            weeks = 8,
+            nowEpochMs = nowMs,
+            timeZone = utc,
+        )
+
+        assertEquals(8, trend.buckets.size)
+        assertTrue(trend.buckets.last().isCurrentWeek)
+        assertEquals(0, trend.buckets[7].distanceMeters)
+        assertEquals(6_000, trend.buckets[6].distanceMeters)
+        assertEquals(5_500, trend.buckets[5].distanceMeters)
+        assertEquals(3_000, trend.buckets[4].distanceMeters)
+        assertEquals(3, trend.activeWeekStreak)
+        assertEquals(2, trend.goalWeekStreak) // weeks -1 and -2 met 5000m goal
+    }
+
+    @Test
+    fun healthConnectSyncManager_formatsHybridTitlesNotesAndFiltersSimulated() {
+        val hybridReal = WorkoutEntity(
+            id = "real-1",
+            startedAtEpochMs = 1_750_000_000_000L,
+            endedAtEpochMs = 1_750_001_200_000L,
+            durationSeconds = 1200,
+            totalDistanceMeters = 3000,
+            avgPaceSecPer500m = 125,
+            avgStrokeRate = 25.0f,
+            avgWatts = 185,
+            totalStrokes = 500,
+            totalCalories = 210,
+            isSimulated = false,
+            programSummary = "Row & KB Swing (Mittel)",
+        )
+        assertTrue(com.waterrower.tracker.health.HealthConnectSyncManager.shouldSyncWorkout(hybridReal))
+        assertEquals(
+            "WaterRower: Row & KB Swing (Mittel)",
+            com.waterrower.tracker.health.HealthConnectSyncManager.buildSessionTitle(hybridReal),
+        )
+        val notes = com.waterrower.tracker.health.HealthConnectSyncManager.buildSessionNotes(hybridReal)
+        assertTrue(notes.contains("Programm: Row & KB Swing (Mittel)"))
+        assertTrue(notes.contains("185 W"))
+
+        val simulated = hybridReal.copy(id = "sim-1", isSimulated = true)
+        assertFalse(com.waterrower.tracker.health.HealthConnectSyncManager.shouldSyncWorkout(simulated))
+
+        val freeRow = hybridReal.copy(id = "free-1", programSummary = null)
+        assertTrue(
+            com.waterrower.tracker.health.HealthConnectSyncManager.buildSessionTitle(freeRow)
+                .startsWith("WaterRower:"),
+        )
     }
 }

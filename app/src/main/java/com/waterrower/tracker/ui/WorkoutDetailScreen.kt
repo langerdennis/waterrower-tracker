@@ -24,6 +24,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.Flag
 import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material3.AlertDialog
@@ -64,6 +65,7 @@ import androidx.compose.ui.unit.dp
 import com.waterrower.tracker.data.WorkoutEntity
 import com.waterrower.tracker.data.WorkoutExporter
 import com.waterrower.tracker.data.WorkoutSampleEntity
+import com.waterrower.tracker.health.HealthConnectSyncManager
 import com.waterrower.tracker.model.RowingTelemetry
 import com.waterrower.tracker.model.Split500m
 import com.waterrower.tracker.model.WorkoutAnalytics
@@ -95,6 +97,7 @@ fun WorkoutDetailScreen(
     var samples by remember { mutableStateOf<List<WorkoutSampleEntity>>(emptyList()) }
     var showDeleteDialog by remember { mutableStateOf(false) }
     var exportingFormat by remember { mutableStateOf<String?>(null) }
+    var isSyncingHealthConnect by remember { mutableStateOf(false) }
 
     LaunchedEffect(workoutId) {
         workout = hub.getWorkout(workoutId)
@@ -103,6 +106,28 @@ fun WorkoutDetailScreen(
 
     val current = workout
     val dateFormat = remember { SimpleDateFormat("dd.MM.yyyy • HH:mm", Locale.GERMANY) }
+
+    fun triggerHealthConnectSync() {
+        val target = current ?: return
+        if (isSyncingHealthConnect) return
+        isSyncingHealthConnect = true
+        scope.launch {
+            try {
+                hub.syncWorkoutToHealthConnect(target)
+                    .onSuccess { syncedAt ->
+                        workout = target.copy(syncedAtEpochMs = syncedAt)
+                        onShowMessage("In Health Connect gespeichert.")
+                    }
+                    .onFailure { err ->
+                        onShowMessage(
+                            "Health Connect: ${err.localizedMessage ?: "Bitte in den Einstellungen aktivieren."}",
+                        )
+                    }
+            } finally {
+                isSyncingHealthConnect = false
+            }
+        }
+    }
 
     fun triggerExport(asCsv: Boolean) {
         val target = current ?: return
@@ -209,6 +234,19 @@ fun WorkoutDetailScreen(
                                     )
                                 }
                             }
+                            if (current?.syncedAtEpochMs != null) {
+                                Surface(
+                                    color = colorScheme.secondaryContainer,
+                                    contentColor = colorScheme.onSecondaryContainer,
+                                    shape = RoundedCornerShape(999.dp),
+                                ) {
+                                    Text(
+                                        text = "✓ Health Connect",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                    )
+                                }
+                            }
                             if (current?.isSimulated == true) {
                                 Surface(
                                     color = colorScheme.tertiaryContainer,
@@ -236,6 +274,27 @@ fun WorkoutDetailScreen(
                                 Icon(Icons.Rounded.Flag, contentDescription = null, modifier = Modifier.size(18.dp))
                                 Spacer(Modifier.width(6.dp))
                                 Text("Als Ghost")
+                            }
+                        }
+                        if (HealthConnectSyncManager.shouldSyncWorkout(current) && current.syncedAtEpochMs == null) {
+                            FilledTonalButton(
+                                onClick = { triggerHealthConnectSync() },
+                                enabled = !isSyncingHealthConnect,
+                            ) {
+                                if (isSyncingHealthConnect) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(16.dp),
+                                        strokeWidth = 2.dp,
+                                    )
+                                } else {
+                                    Icon(
+                                        Icons.Rounded.FavoriteBorder,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                }
+                                Spacer(Modifier.width(6.dp))
+                                Text("Health Connect")
                             }
                         }
                         FilledTonalButton(

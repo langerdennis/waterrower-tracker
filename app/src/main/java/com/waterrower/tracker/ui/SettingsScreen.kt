@@ -75,6 +75,7 @@ import androidx.compose.ui.unit.sp
 import com.waterrower.tracker.data.AppPreferences
 import com.waterrower.tracker.data.OverlaySettings
 import com.waterrower.tracker.data.OverlayStyle
+import com.waterrower.tracker.health.HealthConnectAvailability
 import com.waterrower.tracker.model.BleDiagnostics
 import com.waterrower.tracker.model.ConnectionState
 import com.waterrower.tracker.ui.theme.LocalRowingColors
@@ -96,7 +97,10 @@ fun SettingsScreen(
     connectionState: ConnectionState,
     isSimulatorMode: Boolean,
     workoutCount: Int,
+    unsyncedRealWorkoutCount: Int,
     isBackupBusy: Boolean,
+    healthConnectAvailability: HealthConnectAvailability,
+    isHealthConnectBusy: Boolean,
     currentVersionName: String,
     updateState: UpdateUiState,
     onOpacityChange: (Float) -> Unit,
@@ -111,6 +115,8 @@ fun SettingsScreen(
     onAutoReconnectChange: (Boolean) -> Unit,
     onAutoShowOverlayChange: (Boolean) -> Unit,
     onWeeklyGoalMetersChange: (Int) -> Unit,
+    onToggleHealthConnectSync: (Boolean) -> Unit,
+    onSyncAllHealthConnect: () -> Unit,
     onResetOverlayPosition: () -> Unit,
     onExportBackup: () -> Unit,
     onImportBackup: () -> Unit,
@@ -572,6 +578,49 @@ fun SettingsScreen(
                             )
                             Spacer(Modifier.width(8.dp))
                             Text("Backup wiederherstellen")
+                        }
+                    }
+
+                    HorizontalDivider(color = colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+                    val hcSubtitle = when (healthConnectAvailability) {
+                        HealthConnectAvailability.AVAILABLE ->
+                            "Speichert echte Einheiten (inkl. Kombi-Programme als Rudergerät) lokal in Android Health Connect."
+                        HealthConnectAvailability.UPDATE_OR_INSTALL_REQUIRED ->
+                            "Health Connect App auf diesem Gerät installieren oder aktualisieren."
+                        HealthConnectAvailability.UNAVAILABLE ->
+                            "Health Connect ist auf diesem Gerät nicht verfügbar."
+                    }
+                    SettingToggleRow(
+                        title = "Mit Health Connect synchronisieren",
+                        subtitle = hcSubtitle,
+                        checked = settings.healthConnectSyncEnabled &&
+                            healthConnectAvailability == HealthConnectAvailability.AVAILABLE,
+                        onCheckedChange = { enabled ->
+                            if (healthConnectAvailability == HealthConnectAvailability.AVAILABLE) {
+                                onToggleHealthConnectSync(enabled)
+                            } else {
+                                onShowMessage(hcSubtitle)
+                            }
+                        },
+                    )
+
+                    if (settings.healthConnectSyncEnabled &&
+                        healthConnectAvailability == HealthConnectAvailability.AVAILABLE &&
+                        unsyncedRealWorkoutCount > 0
+                    ) {
+                        OutlinedButton(
+                            onClick = onSyncAllHealthConnect,
+                            enabled = !isHealthConnectBusy,
+                        ) {
+                            if (isHealthConnectBusy) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp,
+                                )
+                                Spacer(Modifier.width(8.dp))
+                            }
+                            Text("$unsyncedRealWorkoutCount offene Einheiten synchronisieren")
                         }
                     }
                 }

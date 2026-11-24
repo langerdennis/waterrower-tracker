@@ -65,10 +65,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.health.connect.client.PermissionController
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import com.waterrower.tracker.data.RecordingState
 import com.waterrower.tracker.data.WorkoutExporter
+import com.waterrower.tracker.health.HealthConnectAvailability
+import com.waterrower.tracker.health.HealthConnectSyncManager
 import com.waterrower.tracker.service.RowingForegroundService
 import com.waterrower.tracker.ui.DashboardScreen
 import com.waterrower.tracker.ui.HistoryScreen
@@ -101,7 +104,21 @@ class MainActivity : ComponentActivity() {
     private var hasAttemptedAutoReconnect = false
     private var permissionDialogState by mutableStateOf<BlePermissionDialogState?>(null)
     private var isBackupBusy by mutableStateOf(false)
+    private var isHealthConnectBusy by mutableStateOf(false)
+    private var healthConnectAvailability by mutableStateOf(HealthConnectAvailability.UNAVAILABLE)
     private var updateState by mutableStateOf<UpdateUiState>(UpdateUiState.Idle)
+
+    private val healthConnectPermissionLauncher = registerForActivityResult(
+        PermissionController.createRequestPermissionResultContract(),
+    ) { granted ->
+        if (granted.containsAll(HealthConnectSyncManager.REQUIRED_PERMISSIONS)) {
+            app.preferences.setHealthConnectSyncEnabled(true)
+            app.sessionHub.emitUiMessage("Health Connect Sync aktiviert.")
+        } else {
+            app.preferences.setHealthConnectSyncEnabled(false)
+            app.sessionHub.emitUiMessage("Health Connect Berechtigung nicht vollständig erteilt.")
+        }
+    }
 
     private val exportBackupLauncher = registerForActivityResult(
         ActivityResultContracts.CreateDocument("application/json"),
@@ -163,6 +180,7 @@ class MainActivity : ComponentActivity() {
             savedInstanceState?.getBoolean(KEY_REQUESTED_NOTIFICATION_PERMISSION, false) ?: false
         hasAttemptedAutoReconnect =
             savedInstanceState?.getBoolean(KEY_AUTO_RECONNECT_ATTEMPTED, false) ?: false
+        healthConnectAvailability = HealthConnectSyncManager.availability(this)
 
         if (!hasAttemptedAutoReconnect) {
             hasAttemptedAutoReconnect = true
@@ -192,6 +210,8 @@ class MainActivity : ComponentActivity() {
                     activity = this,
                     permissionDialogState = permissionDialogState,
                     isBackupBusy = isBackupBusy,
+                    healthConnectAvailability = healthConnectAvailability,
+                    isHealthConnectBusy = isHealthConnectBusy,
                     updateState = updateState,
                     onDismissPermissionDialog = {
                         pendingAfterPermissions = null
@@ -213,6 +233,8 @@ class MainActivity : ComponentActivity() {
                     onResetOverlayPosition = { handleResetOverlayPosition() },
                     onExportBackup = { handleLaunchBackupExport() },
                     onImportBackup = { handleLaunchBackupImport() },
+                    onToggleHealthConnectSync = { enabled -> handleToggleHealthConnectSync(enabled) },
+                    onSyncAllHealthConnect = { handleSyncAllHealthConnect() },
                     onCheckForUpdate = { handleCheckForUpdate() },
                     onDownloadAndInstallUpdate = { release -> handleDownloadAndInstallUpdate(release) },
                     onInstallDownloadedUpdate = { handleInstallReadyApk() },
@@ -223,6 +245,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        healthConnectAvailability = HealthConnectSyncManager.availability(this)
         val ready = updateState as? UpdateUiState.ReadyToInstall
         if (ready != null && ready.needsInstallPermission && packageManager.canRequestPackageInstalls()) {
             updateState = ready.copy(needsInstallPermission = false)
@@ -515,6 +538,52 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun handleToggleHealthConnectSync(enabled: Boolean) {
+        if (!enabled) {
+            app.preferences.setHealthConnectSyncEnabled(false)
+            app.sessionHub.emitUiMessage("Health Connect Sync deaktiviert.")
+            return
+        }
+        lifecycleScope.launch {
+            if (HealthConnectSyncManager.hasAllPermissions(this@MainActivity)) {
+                app.preferences.setHealthConnectSyncEnabled(true)
+                app.sessionHub.emitUiMessage("Health Connect Sync aktiviert.")
+            } else {
+                healthConnectPermissionLauncher.launch(HealthConnectSyncManager.REQUIRED_PERMISSIONS)
+            }
+        }
+    }
+
+    private fun handleSyncAllHealthConnect() {
+        if (isHealthConnectBusy) return
+        isHealthConnectBusy = true
+        lifecycleScope.launch {
+            try {
+                if (!HealthConnectSyncManager.hasAllPermissions(this@MainActivity)) {
+                    healthConnectPermissionLauncher.launch(HealthConnectSyncManager.REQUIRED_PERMISSIONS)
+                    return@launch
+                }
+                app.sessionHub.syncAllUnsyncedToHealthConnect()
+                    .onSuccess { count ->
+                        app.sessionHub.emitUiMessage(
+                            when (count) {
+                                0 -> "Alle echten Einheiten sind bereits synchronisiert."
+                                1 -> "1 Einheit zu Health Connect synchronisiert."
+                                else -> "$count Einheiten zu Health Connect synchronisiert."
+                            },
+                        )
+                    }
+                    .onFailure { err ->
+                        app.sessionHub.emitUiMessage(
+                            "Health Connect Sync fehlgeschlagen: ${err.localizedMessage ?: "Unbekannter Fehler"}",
+                        )
+                    }
+            } finally {
+                isHealthConnectBusy = false
+            }
+        }
+    }
+
     companion object {
         private const val KEY_REQUESTED_NOTIFICATION_PERMISSION = "requested_notification_permission"
         private const val KEY_AUTO_RECONNECT_ATTEMPTED = "auto_reconnect_attempted"
@@ -526,6 +595,8 @@ private fun WaterRowerRoot(
     activity: MainActivity,
     permissionDialogState: BlePermissionDialogState?,
     isBackupBusy: Boolean,
+    healthConnectAvailability: HealthConnectAvailability,
+    isHealthConnectBusy: Boolean,
     updateState: UpdateUiState,
     onDismissPermissionDialog: () -> Unit,
     onRetryBlePermissions: () -> Unit,
@@ -537,6 +608,8 @@ private fun WaterRowerRoot(
     onResetOverlayPosition: () -> Unit,
     onExportBackup: () -> Unit,
     onImportBackup: () -> Unit,
+    onToggleHealthConnectSync: (Boolean) -> Unit,
+    onSyncAllHealthConnect: () -> Unit,
     onCheckForUpdate: () -> Unit,
     onDownloadAndInstallUpdate: (ReleaseInfo) -> Unit,
     onInstallDownloadedUpdate: () -> Unit,
@@ -742,6 +815,8 @@ private fun WaterRowerRoot(
                                 isOverlayVisible = isOverlayVisible,
                                 isSimulatorMode = isSimulatorMode,
                                 isBackupBusy = isBackupBusy,
+                                healthConnectAvailability = healthConnectAvailability,
+                                isHealthConnectBusy = isHealthConnectBusy,
                                 updateState = updateState,
                                 settings = settings,
                                 workouts = workouts,
@@ -753,6 +828,8 @@ private fun WaterRowerRoot(
                                 onResetOverlayPosition = onResetOverlayPosition,
                                 onExportBackup = onExportBackup,
                                 onImportBackup = onImportBackup,
+                                onToggleHealthConnectSync = onToggleHealthConnectSync,
+                                onSyncAllHealthConnect = onSyncAllHealthConnect,
                                 onCheckForUpdate = onCheckForUpdate,
                                 onDownloadAndInstallUpdate = onDownloadAndInstallUpdate,
                                 onInstallDownloadedUpdate = onInstallDownloadedUpdate,
@@ -810,6 +887,8 @@ private fun WaterRowerRoot(
                             isOverlayVisible = isOverlayVisible,
                             isSimulatorMode = isSimulatorMode,
                             isBackupBusy = isBackupBusy,
+                            healthConnectAvailability = healthConnectAvailability,
+                            isHealthConnectBusy = isHealthConnectBusy,
                             updateState = updateState,
                             settings = settings,
                             workouts = workouts,
@@ -821,6 +900,8 @@ private fun WaterRowerRoot(
                             onResetOverlayPosition = onResetOverlayPosition,
                             onExportBackup = onExportBackup,
                             onImportBackup = onImportBackup,
+                            onToggleHealthConnectSync = onToggleHealthConnectSync,
+                            onSyncAllHealthConnect = onSyncAllHealthConnect,
                             onCheckForUpdate = onCheckForUpdate,
                             onDownloadAndInstallUpdate = onDownloadAndInstallUpdate,
                             onInstallDownloadedUpdate = onInstallDownloadedUpdate,
@@ -854,6 +935,8 @@ private fun TabContent(
     isOverlayVisible: Boolean,
     isSimulatorMode: Boolean,
     isBackupBusy: Boolean,
+    healthConnectAvailability: HealthConnectAvailability,
+    isHealthConnectBusy: Boolean,
     updateState: UpdateUiState,
     settings: com.waterrower.tracker.data.OverlaySettings,
     workouts: List<com.waterrower.tracker.data.WorkoutEntity>,
@@ -865,6 +948,8 @@ private fun TabContent(
     onResetOverlayPosition: () -> Unit,
     onExportBackup: () -> Unit,
     onImportBackup: () -> Unit,
+    onToggleHealthConnectSync: (Boolean) -> Unit,
+    onSyncAllHealthConnect: () -> Unit,
     onCheckForUpdate: () -> Unit,
     onDownloadAndInstallUpdate: (ReleaseInfo) -> Unit,
     onInstallDownloadedUpdate: () -> Unit,
@@ -939,7 +1024,12 @@ private fun TabContent(
             connectionState = connectionState,
             isSimulatorMode = isSimulatorMode,
             workoutCount = workouts.size,
+            unsyncedRealWorkoutCount = remember(workouts) {
+                workouts.count { it.syncedAtEpochMs == null && HealthConnectSyncManager.shouldSyncWorkout(it) }
+            },
             isBackupBusy = isBackupBusy,
+            healthConnectAvailability = healthConnectAvailability,
+            isHealthConnectBusy = isHealthConnectBusy,
             currentVersionName = BuildConfig.VERSION_NAME,
             updateState = updateState,
             onOpacityChange = { prefs.setOpacity(it) },
@@ -954,6 +1044,8 @@ private fun TabContent(
             onAutoReconnectChange = { prefs.setAutoReconnectOnStart(it) },
             onAutoShowOverlayChange = { prefs.setAutoShowOverlayOnConnect(it) },
             onWeeklyGoalMetersChange = { prefs.setWeeklyGoalMeters(it) },
+            onToggleHealthConnectSync = onToggleHealthConnectSync,
+            onSyncAllHealthConnect = onSyncAllHealthConnect,
             onResetOverlayPosition = onResetOverlayPosition,
             onExportBackup = onExportBackup,
             onImportBackup = onImportBackup,

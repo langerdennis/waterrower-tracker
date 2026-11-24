@@ -66,6 +66,9 @@ interface WorkoutDao {
         return imported
     }
 
+    @Query("UPDATE workouts SET syncedAtEpochMs = :syncedAtEpochMs WHERE id = :workoutId")
+    suspend fun markWorkoutSynced(workoutId: String, syncedAtEpochMs: Long)
+
     @Query("DELETE FROM workouts WHERE id = :workoutId")
     suspend fun deleteWorkout(workoutId: String)
 }

@@ -7,6 +7,7 @@ import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
+import android.os.SystemClock
 import android.provider.Settings
 import android.text.SpannableStringBuilder
 import android.text.Spanned
@@ -42,9 +43,9 @@ import kotlin.math.roundToInt
  * - Touch events outside the pill pass straight through to the underlying app.
  * - Drag anywhere on screen (clamped to screen & display cutout bounds, position persisted)
  *   unless locked via [OverlaySettings.overlayPositionLocked].
- * - Supports 3 visual styles (Standard, Cinema, Transparent) plus an Ultra-Compact display mode.
- * - Tap to toggle between compact Mini-Pill and Expanded Controls (Pause/Weiter, Stop & Save,
- *   quick Compact/Full & Lock/Free toggles).
+ * - Supports 3 visual styles (Standard, Cinema, Transparent), Ultra-Compact mode,
+ *   low-battery alert for the S4 ComModule, and gentle auto-dimming after 15s of idle flywheel.
+ * - Tap to toggle between compact Mini-Pill and Expanded Controls.
  */
 class FloatingOverlayController(
     private val context: Context,
@@ -72,6 +73,7 @@ class FloatingOverlayController(
     private var recordButton: TextView? = null
     private var compactToggleButton: TextView? = null
     private var lockToggleButton: TextView? = null
+    private var styleToggleButton: TextView? = null
 
     private var pillDrawable: GradientDrawable? = null
     private var dotDrawable: GradientDrawable? = null
@@ -80,6 +82,7 @@ class FloatingOverlayController(
     private var recordBtnDrawable: GradientDrawable? = null
     private var compactBtnDrawable: GradientDrawable? = null
     private var lockBtnDrawable: GradientDrawable? = null
+    private var styleBtnDrawable: GradientDrawable? = null
 
     private var appliedOpacity: Float = Float.NaN
     private var appliedBorderColor: Int = 0
@@ -100,8 +103,12 @@ class FloatingOverlayController(
     private var lastRecordColor: Int = 0
     private var lastCompactMode: Boolean? = null
     private var lastLockedMode: Boolean? = null
+    private var lastStyleButtonStyle: OverlayStyle? = null
     private var lastAppliedSettingsX: Int = Int.MIN_VALUE
     private var lastAppliedSettingsY: Int = Int.MIN_VALUE
+
+    private var idleSinceElapsedMs: Long? = null
+    private var isAutoDimmed: Boolean = false
 
     private var isExpanded = false
     private var lastTelemetry = RowingTelemetry()
@@ -111,6 +118,7 @@ class FloatingOverlayController(
     private var lastGoal: WorkoutGoal = WorkoutGoal()
     private var lastGhostDelta: GhostDelta? = null
     private var lastProgram: ProgramProgressState? = null
+    private var lastBatteryPercent: Int? = null
 
     val isShowing: Boolean get() = rootView != null
 
@@ -131,6 +139,7 @@ class FloatingOverlayController(
         val recordBg = createChipDrawable(COLOR_SKY)
         val compactBg = createChipDrawable(COLOR_SLATE_CHIP)
         val lockBg = createChipDrawable(COLOR_SLATE_CHIP)
+        val styleBg = createChipDrawable(COLOR_SLATE_CHIP)
 
         val container = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -234,11 +243,16 @@ class FloatingOverlayController(
         actionRow.addView(appBtn)
         actionRow.addView(closeBtn)
 
-        // Quick-toggle row for Cinema Compact mode & Position Lock (usable mid-episode)
+        // Quick-toggle row for Style, Cinema Compact mode & Position Lock (usable mid-episode)
         val quickToggleRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(0, dp(6), 0, 0)
+        }
+        val styleBtn = createActionChip("Stil: Standard", styleBg) {
+            val all = OverlayStyle.entries
+            val next = all[(all.indexOf(lastSettings.overlayStyle) + 1) % all.size]
+            preferences.setOverlayStyle(next)
         }
         val compactBtn = createActionChip("Kompakt", compactBg) {
             preferences.setCompactOverlayMode(!lastSettings.compactOverlayMode)
@@ -246,6 +260,7 @@ class FloatingOverlayController(
         val lockBtn = createActionChip("Pos: Frei", lockBg) {
             preferences.setOverlayPositionLocked(!lastSettings.overlayPositionLocked)
         }
+        quickToggleRow.addView(styleBtn)
         quickToggleRow.addView(compactBtn)
         quickToggleRow.addView(lockBtn)
 
@@ -303,6 +318,9 @@ class FloatingOverlayController(
                     initialTouchX = event.rawX
                     initialTouchY = event.rawY
                     moved = false
+                    // Wake immediately on touch
+                    idleSinceElapsedMs = null
+                    setAutoDimmed(container, false)
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
@@ -358,6 +376,7 @@ class FloatingOverlayController(
             recordButton = recBtn
             compactToggleButton = compactBtn
             lockToggleButton = lockBtn
+            styleToggleButton = styleBtn
             pillDrawable = pillBg
             dotDrawable = dotBg
             progressFillDrawable = fillBg
@@ -365,6 +384,7 @@ class FloatingOverlayController(
             recordBtnDrawable = recordBg
             compactBtnDrawable = compactBg
             lockBtnDrawable = lockBg
+            styleBtnDrawable = styleBg
             lastAppliedSettingsX = settings.overlayX
             lastAppliedSettingsY = settings.overlayY
             render()
@@ -394,6 +414,7 @@ class FloatingOverlayController(
         recordButton = null
         compactToggleButton = null
         lockToggleButton = null
+        styleToggleButton = null
         pillDrawable = null
         dotDrawable = null
         progressFillDrawable = null
@@ -401,7 +422,10 @@ class FloatingOverlayController(
         recordBtnDrawable = null
         compactBtnDrawable = null
         lockBtnDrawable = null
+        styleBtnDrawable = null
         isExpanded = false
+        idleSinceElapsedMs = null
+        isAutoDimmed = false
         resetRenderCache()
     }
 
@@ -445,6 +469,7 @@ class FloatingOverlayController(
         goal: WorkoutGoal = lastGoal,
         ghostDelta: GhostDelta? = lastGhostDelta,
         program: ProgramProgressState? = lastProgram,
+        batteryPercent: Int? = lastBatteryPercent,
     ) {
         lastTelemetry = telemetry
         lastConnection = connection
@@ -453,6 +478,7 @@ class FloatingOverlayController(
         lastGoal = goal
         lastGhostDelta = ghostDelta
         lastProgram = program
+        lastBatteryPercent = batteryPercent
         render()
     }
 
@@ -489,6 +515,24 @@ class FloatingOverlayController(
 
         val style = lastSettings.overlayStyle
         val program = lastProgram
+
+        // Gentle auto-dimming when flywheel is idle > 15s (never dims during active rest/KB station or expanded view)
+        val inActiveOffRowerOrRest = program != null && !program.isCompleted &&
+            (program.currentStep is ProgramStep.TimedRest || program.currentStep is ProgramStep.OffRowerStation)
+        val shouldStayBright = isExpanded ||
+            lastTelemetry.strokeRateSpm > 0f ||
+            inActiveOffRowerOrRest
+        val nowElapsed = SystemClock.elapsedRealtime()
+        if (shouldStayBright) {
+            idleSinceElapsedMs = null
+            setAutoDimmed(root, false)
+        } else {
+            val startedIdle = idleSinceElapsedMs ?: nowElapsed.also { idleSinceElapsedMs = it }
+            if (nowElapsed - startedIdle >= IDLE_AUTO_DIM_MS) {
+                setAutoDimmed(root, true)
+            }
+        }
+
         val paceZone = lastGoal.evaluatePaceZone(lastTelemetry.paceSecondsPer500m)
         val borderBaseColor = when {
             program?.isCompleted == true -> COLOR_ACTIVE_GREEN
@@ -616,21 +660,42 @@ class FloatingOverlayController(
         } else {
             Color.argb(200, Color.red(rawGhostColor), Color.green(rawGhostColor), Color.blue(rawGhostColor))
         }
-        val miniKey = "$baseMini|$ghostSuffix|$ghostColor"
+
+        // Low-battery alert for the WaterRower S4 ComModule (< 20%)
+        val lowBatteryPct = lastBatteryPercent?.takeIf {
+            lastConnection is ConnectionState.Connected && it in 1 until LOW_BATTERY_THRESHOLD_PERCENT
+        }
+        val lowBatColor = if (lowBatteryPct != null && lowBatteryPct <= 10) COLOR_DISCONNECTED else COLOR_AMBER
+        val lowBatKey = lowBatteryPct?.toString() ?: ""
+
+        val miniKey = "$baseMini|$ghostSuffix|$ghostColor|$lowBatKey"
         if (miniKey != lastMiniKey) {
-            if (ghost == null) {
+            if (ghost == null && lowBatteryPct == null) {
                 miniLineView?.text = baseMini
             } else {
                 val spannable = SpannableStringBuilder(baseMini)
-                spannable.append("  •  ")
-                val start = spannable.length
-                spannable.append(ghost.formattedCompact)
-                spannable.setSpan(
-                    ForegroundColorSpan(ghostColor),
-                    start,
-                    spannable.length,
-                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
-                )
+                if (ghost != null) {
+                    spannable.append("  •  ")
+                    val start = spannable.length
+                    spannable.append(ghost.formattedCompact)
+                    spannable.setSpan(
+                        ForegroundColorSpan(ghostColor),
+                        start,
+                        spannable.length,
+                        Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+                    )
+                }
+                if (lowBatteryPct != null) {
+                    spannable.append("  •  ")
+                    val start = spannable.length
+                    spannable.append("🔋 $lowBatteryPct%")
+                    spannable.setSpan(
+                        ForegroundColorSpan(lowBatColor),
+                        start,
+                        spannable.length,
+                        Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+                    )
+                }
                 miniLineView?.text = spannable
             }
             lastMiniKey = miniKey
@@ -682,6 +747,13 @@ class FloatingOverlayController(
             lastNextStepVisible = showNextStepBtn
         }
 
+        if (lastStyleButtonStyle != style) {
+            styleToggleButton?.text = "Stil: ${style.label}"
+            styleBtnDrawable?.setColor(
+                if (style == OverlayStyle.STANDARD) COLOR_SLATE_CHIP else COLOR_VIOLET,
+            )
+            lastStyleButtonStyle = style
+        }
         if (lastCompactMode != lastSettings.compactOverlayMode) {
             compactToggleButton?.text = if (lastSettings.compactOverlayMode) "Voll" else "Kompakt"
             compactBtnDrawable?.setColor(
@@ -764,6 +836,16 @@ class FloatingOverlayController(
                 }
             }
         }
+    }
+
+    private fun setAutoDimmed(view: View, dimmed: Boolean) {
+        if (isAutoDimmed == dimmed) return
+        isAutoDimmed = dimmed
+        val targetAlpha = if (dimmed) IDLE_DIM_ALPHA else 1.0f
+        view.animate()
+            .alpha(targetAlpha)
+            .setDuration(if (dimmed) 450L else 160L)
+            .start()
     }
 
     private fun applyTextStyle(style: OverlayStyle, opacity: Float) {
@@ -853,6 +935,7 @@ class FloatingOverlayController(
         lastRecordColor = 0
         lastCompactMode = null
         lastLockedMode = null
+        lastStyleButtonStyle = null
         lastAppliedSettingsX = Int.MIN_VALUE
         lastAppliedSettingsY = Int.MIN_VALUE
     }
@@ -966,6 +1049,10 @@ class FloatingOverlayController(
         ).roundToInt()
 
     companion object {
+        private const val IDLE_AUTO_DIM_MS = 15_000L
+        private const val IDLE_DIM_ALPHA = 0.45f
+        private const val LOW_BATTERY_THRESHOLD_PERCENT = 20
+
         private val COLOR_ACTIVE_GREEN = Color.parseColor("#22C55E")
         private val COLOR_SAVE_GREEN = Color.parseColor("#16A34A")
         private val COLOR_CONNECTED_SKY = Color.parseColor("#38BDF8")
