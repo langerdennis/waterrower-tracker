@@ -25,9 +25,9 @@ import kotlin.math.roundToInt
 
 /**
  * Lightweight, crash-proof native WindowManager overlay designed to float over
- * fullscreen video apps like Nuvio on Pixel Tablet / Android 17.
+ * fullscreen video and streaming apps on Android tablets and phones.
  *
- * - Touch events outside the pill pass straight through to Nuvio.
+ * - Touch events outside the pill pass straight through to the underlying app.
  * - Drag anywhere on screen (position persisted).
  * - Tap to toggle between compact Mini-Pill and Expanded Controls.
  */

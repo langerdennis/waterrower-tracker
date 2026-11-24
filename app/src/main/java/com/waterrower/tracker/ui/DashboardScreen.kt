@@ -216,7 +216,7 @@ fun DashboardScreen(
             }
         }
 
-        // 4. Live Metrics Grid (adaptive 2 or 3 columns for Pixel Tablet)
+        // 4. Live Metrics Grid (adaptive 2 or 3 columns for tablets)
         val displayDistance = when (recordingState) {
             is RecordingState.Active -> RowingTelemetry.formatDistance(recordingState.distanceMeters)
             RecordingState.Idle -> telemetry.formattedDistance

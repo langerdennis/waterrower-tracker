@@ -24,8 +24,8 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
 /**
- * Foreground Service (connectedDevice) that keeps the BLE link to the S4 Comms 61,
- * workout recording, and the floating overlay alive while watching Nuvio fullscreen.
+ * Foreground Service (connectedDevice) that keeps the BLE link to the S4 ComModule,
+ * workout recording, and the floating overlay alive while using other apps fullscreen.
  */
 class RowingForegroundService : LifecycleService() {
 

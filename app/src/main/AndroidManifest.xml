@@ -18,7 +18,7 @@
         android:name="android.permission.ACCESS_FINE_LOCATION"
         android:maxSdkVersion="30" />
 
-    <!-- Floating Overlay over Nuvio / other apps -->
+    <!-- Floating Overlay over fullscreen video / other apps -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <!-- Foreground Service for persistent BLE connection & recording -->

@@ -61,7 +61,7 @@ fun SettingsScreen(
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
                 Text(
-                    text = "Floating Overlay (über Nuvio)",
+                    text = "Floating Overlay",
                     style = MaterialTheme.typography.titleLarge,
                 )
 

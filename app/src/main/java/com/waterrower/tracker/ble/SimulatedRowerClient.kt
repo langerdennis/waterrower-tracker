@@ -16,7 +16,7 @@ import kotlin.math.roundToInt
 import kotlin.math.sin
 
 /**
- * Realistic WaterRower simulator for testing the Floating Overlay over Nuvio
+ * Realistic WaterRower simulator for testing the Floating Overlay over other apps
  * and local workout recording without having the physical rower connected.
  */
 class SimulatedRowerClient(
