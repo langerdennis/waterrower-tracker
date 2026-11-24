@@ -6,11 +6,14 @@ import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.provider.Settings
+import android.util.DisplayMetrics
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.WindowInsets
 import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -28,14 +31,16 @@ import kotlin.math.roundToInt
  * fullscreen video and streaming apps on Android tablets and phones.
  *
  * - Touch events outside the pill pass straight through to the underlying app.
- * - Drag anywhere on screen (position persisted).
- * - Tap to toggle between compact Mini-Pill and Expanded Controls.
+ * - Drag anywhere on screen (clamped to screen & display cutout bounds, position persisted).
+ * - Tap to toggle between compact Mini-Pill and Expanded Controls (Pause/Weiter + Stop & Save).
  */
 class FloatingOverlayController(
     private val context: Context,
     private val preferences: AppPreferences,
+    private val onStartRecording: () -> Unit,
+    private val onTogglePause: () -> Unit,
+    private val onStopAndSave: () -> Unit,
     private val onOpenApp: () -> Unit,
-    private val onToggleRecording: () -> Unit,
     private val onCloseOverlay: () -> Unit,
 ) {
     private val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
@@ -46,7 +51,26 @@ class FloatingOverlayController(
     private var miniLineView: TextView? = null
     private var expandedRow: LinearLayout? = null
     private var extraMetricsView: TextView? = null
+    private var pauseButton: TextView? = null
     private var recordButton: TextView? = null
+
+    private var pillDrawable: GradientDrawable? = null
+    private var dotDrawable: GradientDrawable? = null
+    private var pauseBtnDrawable: GradientDrawable? = null
+    private var recordBtnDrawable: GradientDrawable? = null
+
+    private var appliedOpacity: Float = Float.NaN
+    private var appliedScale: Float = Float.NaN
+    private var appliedDotColor: Int = 0
+    private var lastMiniText: String? = null
+    private var lastExtraText: String? = null
+    private var lastPauseVisible: Boolean? = null
+    private var lastPauseText: String? = null
+    private var lastPauseColor: Int = 0
+    private var lastRecordText: String? = null
+    private var lastRecordColor: Int = 0
+    private var lastAppliedSettingsX: Int = Int.MIN_VALUE
+    private var lastAppliedSettingsY: Int = Int.MIN_VALUE
 
     private var isExpanded = false
     private var lastTelemetry = RowingTelemetry()
@@ -63,24 +87,17 @@ class FloatingOverlayController(
 
         val settings = preferences.settings.value
         lastSettings = settings
+        resetRenderCache()
 
-        val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-            PixelFormat.TRANSLUCENT,
-        ).apply {
-            gravity = Gravity.TOP or Gravity.START
-            x = settings.overlayX
-            y = settings.overlayY
-        }
+        val pillBg = createPillBackground(settings.opacity)
+        val dotBg = createDotBackground(COLOR_DISCONNECTED)
+        val pauseBg = createChipDrawable(COLOR_AMBER)
+        val recordBg = createChipDrawable(COLOR_SKY)
 
         val container = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(14), dp(9), dp(14), dp(9))
-            background = createPillBackground(settings.opacity)
+            background = pillBg
             elevation = dp(8).toFloat()
         }
 
@@ -95,7 +112,7 @@ class FloatingOverlayController(
             layoutParams = LinearLayout.LayoutParams(size, size).apply {
                 marginEnd = dp(9)
             }
-            background = createDotBackground(Color.parseColor("#64748B"))
+            background = dotBg
         }
 
         val miniText = TextView(context).apply {
@@ -128,10 +145,24 @@ class FloatingOverlayController(
             gravity = Gravity.CENTER_VERTICAL
         }
 
-        val recBtn = createActionChip("Start", "#0EA5E9") { onToggleRecording() }
-        val appBtn = createActionChip("App", "#334155") { onOpenApp() }
-        val closeBtn = createActionChip("Ausblenden", "#7F1D1D") { onCloseOverlay() }
+        val pauseBtn = createActionChip("Pause", pauseBg) {
+            if (lastRecording is RecordingState.Active) {
+                onTogglePause()
+            }
+        }.apply {
+            visibility = View.GONE
+        }
+        val recBtn = createActionChip("Aufnahme", recordBg) {
+            if (lastRecording is RecordingState.Active) {
+                onStopAndSave()
+            } else {
+                onStartRecording()
+            }
+        }
+        val appBtn = createActionChip("App", createChipDrawable(COLOR_SLATE_CHIP)) { onOpenApp() }
+        val closeBtn = createActionChip("Ausblenden", createChipDrawable(COLOR_CLOSE_CHIP)) { onCloseOverlay() }
 
+        actionRow.addView(pauseBtn)
         actionRow.addView(recBtn)
         actionRow.addView(appBtn)
         actionRow.addView(closeBtn)
@@ -140,6 +171,40 @@ class FloatingOverlayController(
         expanded.addView(actionRow)
         container.addView(expanded)
 
+        // Pre-measure so initial position is clamped accurately before addView()
+        container.measure(
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+        )
+        val (clampedX, clampedY) = clampPosition(settings.overlayX, settings.overlayY, container)
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT,
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = clampedX
+            y = clampedY
+        }
+
+        // Re-clamp automatically when layout size changes (initial layout, tap-to-expand, scale, longer text)
+        container.addOnLayoutChangeListener { view, _, _, _, _, _, _, _, _ ->
+            val lp = layoutParams ?: return@addOnLayoutChangeListener
+            val (nx, ny) = clampPosition(lp.x, lp.y, view)
+            if (nx != lp.x || ny != lp.y) {
+                lp.x = nx
+                lp.y = ny
+                try {
+                    windowManager.updateViewLayout(view, lp)
+                } catch (_: Exception) {
+                }
+            }
+        }
+
         // Drag & tap handling on the container
         var initialX = 0
         var initialY = 0
@@ -147,7 +212,7 @@ class FloatingOverlayController(
         var initialTouchY = 0f
         var moved = false
 
-        container.setOnTouchListener { _, event ->
+        container.setOnTouchListener { view, event ->
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
                     initialX = params.x
@@ -164,21 +229,27 @@ class FloatingOverlayController(
                         moved = true
                     }
                     if (moved) {
-                        params.x = (initialX + dx).coerceAtLeast(0)
-                        params.y = (initialY + dy).coerceAtLeast(0)
-                        try {
-                            windowManager.updateViewLayout(container, params)
-                        } catch (_: Exception) {
+                        val (nx, ny) = clampPosition(initialX + dx, initialY + dy, view)
+                        if (nx != params.x || ny != params.y) {
+                            params.x = nx
+                            params.y = ny
+                            try {
+                                windowManager.updateViewLayout(container, params)
+                            } catch (_: Exception) {
+                            }
                         }
                     }
                     true
                 }
                 MotionEvent.ACTION_UP -> {
                     if (moved) {
+                        lastAppliedSettingsX = params.x
+                        lastAppliedSettingsY = params.y
                         preferences.saveOverlayPosition(params.x, params.y)
                     } else {
                         isExpanded = !isExpanded
                         expanded.visibility = if (isExpanded) View.VISIBLE else View.GONE
+                        render()
                     }
                     true
                 }
@@ -194,7 +265,17 @@ class FloatingOverlayController(
             miniLineView = miniText
             expandedRow = expanded
             extraMetricsView = extraMetrics
+            pauseButton = pauseBtn
             recordButton = recBtn
+            pillDrawable = pillBg
+            dotDrawable = dotBg
+            pauseBtnDrawable = pauseBg
+            recordBtnDrawable = recordBg
+            appliedOpacity = settings.opacity
+            appliedScale = settings.scale
+            appliedDotColor = COLOR_DISCONNECTED
+            lastAppliedSettingsX = settings.overlayX
+            lastAppliedSettingsY = settings.overlayY
             render()
             true
         } catch (_: Exception) {
@@ -214,8 +295,46 @@ class FloatingOverlayController(
         miniLineView = null
         expandedRow = null
         extraMetricsView = null
+        pauseButton = null
         recordButton = null
+        pillDrawable = null
+        dotDrawable = null
+        pauseBtnDrawable = null
+        recordBtnDrawable = null
         isExpanded = false
+        resetRenderCache()
+    }
+
+    fun onConfigurationChanged() {
+        val view = rootView ?: return
+        val params = layoutParams ?: return
+        val (nx, ny) = clampPosition(params.x, params.y, view)
+        if (nx != params.x || ny != params.y) {
+            params.x = nx
+            params.y = ny
+            try {
+                windowManager.updateViewLayout(view, params)
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    fun resetPosition() {
+        val view = rootView ?: return
+        val params = layoutParams ?: return
+        val (nx, ny) = clampPosition(
+            AppPreferences.DEFAULT_OVERLAY_X,
+            AppPreferences.DEFAULT_OVERLAY_Y,
+            view,
+        )
+        params.x = nx
+        params.y = ny
+        lastAppliedSettingsX = AppPreferences.DEFAULT_OVERLAY_X
+        lastAppliedSettingsY = AppPreferences.DEFAULT_OVERLAY_Y
+        try {
+            windowManager.updateViewLayout(view, params)
+        } catch (_: Exception) {
+        }
     }
 
     fun update(
@@ -233,63 +352,207 @@ class FloatingOverlayController(
 
     private fun render() {
         val root = rootView ?: return
-        root.background = createPillBackground(lastSettings.opacity)
+        val params = layoutParams
 
-        miniLineView?.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f * lastSettings.scale)
-        extraMetricsView?.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f * lastSettings.scale)
-
-        val dotColor = when {
-            lastRecording is RecordingState.Active && !(lastRecording as RecordingState.Active).isPaused ->
-                Color.parseColor("#22C55E")
-            lastConnection is ConnectionState.Connected ->
-                Color.parseColor("#38BDF8")
-            lastConnection is ConnectionState.Connecting ->
-                Color.parseColor("#F59E0B")
-            else ->
-                Color.parseColor("#EF4444")
+        // Sync external position preference updates (e.g. Reset Position from Settings)
+        if (params != null &&
+            (lastSettings.overlayX != lastAppliedSettingsX || lastSettings.overlayY != lastAppliedSettingsY)
+        ) {
+            lastAppliedSettingsX = lastSettings.overlayX
+            lastAppliedSettingsY = lastSettings.overlayY
+            val (nx, ny) = clampPosition(lastSettings.overlayX, lastSettings.overlayY, root)
+            if (nx != params.x || ny != params.y) {
+                params.x = nx
+                params.y = ny
+                try {
+                    windowManager.updateViewLayout(root, params)
+                } catch (_: Exception) {
+                }
+            }
         }
-        statusDot?.background = createDotBackground(dotColor)
+
+        if (lastSettings.opacity != appliedOpacity) {
+            updatePillDrawable(pillDrawable, lastSettings.opacity)
+            appliedOpacity = lastSettings.opacity
+        }
+
+        if (lastSettings.scale != appliedScale) {
+            miniLineView?.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f * lastSettings.scale)
+            extraMetricsView?.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f * lastSettings.scale)
+            appliedScale = lastSettings.scale
+        }
+
+        val rec = lastRecording
+        val dotColor = when {
+            rec is RecordingState.Active && !rec.isPaused -> COLOR_ACTIVE_GREEN
+            rec is RecordingState.Active && rec.isPaused -> COLOR_AMBER
+            lastConnection is ConnectionState.Connected -> COLOR_CONNECTED_SKY
+            lastConnection is ConnectionState.Connecting -> COLOR_AMBER
+            else -> COLOR_DISCONNECTED
+        }
+        if (dotColor != appliedDotColor) {
+            dotDrawable?.setColor(dotColor)
+            appliedDotColor = dotColor
+        }
 
         val spmText = String.format(Locale.US, "%.0f", lastTelemetry.strokeRateSpm)
-        val elapsedToShow = when (val rec = lastRecording) {
+        val elapsedToShow = when (rec) {
             is RecordingState.Active -> RowingTelemetry.formatDuration(rec.elapsedSeconds)
             RecordingState.Idle -> lastTelemetry.formattedElapsed
         }
-        val distToShow = when (val rec = lastRecording) {
+        val distToShow = when (rec) {
             is RecordingState.Active -> RowingTelemetry.formatDistance(rec.distanceMeters)
             RecordingState.Idle -> lastTelemetry.formattedDistance
         }
-
         val wattsSuffix = if (lastSettings.showWattsInMini && lastTelemetry.watts > 0) {
             "  •  ${lastTelemetry.watts} W"
         } else {
             ""
         }
-
-        miniLineView?.text =
+        val miniText =
             "${lastTelemetry.formattedPace} /500m  •  $spmText spm  •  $distToShow  •  $elapsedToShow$wattsSuffix"
+        if (miniText != lastMiniText) {
+            miniLineView?.text = miniText
+            lastMiniText = miniText
+        }
 
-        val hrPart = lastTelemetry.heartRateBpm?.let { "  •  $it bpm" } ?: ""
-        extraMetricsView?.text =
-            "${lastTelemetry.watts} W  •  ${lastTelemetry.calories} kcal  •  ${lastTelemetry.strokeCount} Züge$hrPart"
+        if (isExpanded) {
+            val caloriesToShow = when (rec) {
+                is RecordingState.Active -> rec.calories
+                RecordingState.Idle -> lastTelemetry.calories
+            }
+            val strokesToShow = when (rec) {
+                is RecordingState.Active -> rec.strokeCount
+                RecordingState.Idle -> lastTelemetry.strokeCount
+            }
+            val hrPart = lastTelemetry.heartRateBpm?.let { "  •  $it bpm" } ?: ""
+            val extraText = "${lastTelemetry.watts} W  •  $caloriesToShow kcal  •  $strokesToShow Züge$hrPart"
+            if (extraText != lastExtraText) {
+                extraMetricsView?.text = extraText
+                lastExtraText = extraText
+            }
+        }
 
-        recordButton?.text = when (val rec = lastRecording) {
-            is RecordingState.Active -> if (rec.isPaused) "Weiter" else "Stop & Save"
-            RecordingState.Idle -> "Aufnahme"
+        when (rec) {
+            is RecordingState.Active -> {
+                if (lastPauseVisible != true) {
+                    pauseButton?.visibility = View.VISIBLE
+                    lastPauseVisible = true
+                }
+                val pauseLabel = if (rec.isPaused) "Weiter" else "Pause"
+                val pauseColor = if (rec.isPaused) COLOR_SKY else COLOR_AMBER
+                if (pauseLabel != lastPauseText) {
+                    pauseButton?.text = pauseLabel
+                    lastPauseText = pauseLabel
+                }
+                if (pauseColor != lastPauseColor) {
+                    pauseBtnDrawable?.setColor(pauseColor)
+                    lastPauseColor = pauseColor
+                }
+
+                val recLabel = "Stop & Save"
+                val recColor = COLOR_SAVE_GREEN
+                if (recLabel != lastRecordText) {
+                    recordButton?.text = recLabel
+                    lastRecordText = recLabel
+                }
+                if (recColor != lastRecordColor) {
+                    recordBtnDrawable?.setColor(recColor)
+                    lastRecordColor = recColor
+                }
+            }
+            RecordingState.Idle -> {
+                if (lastPauseVisible != false) {
+                    pauseButton?.visibility = View.GONE
+                    lastPauseVisible = false
+                }
+                val recLabel = "Aufnahme"
+                val recColor = COLOR_SKY
+                if (recLabel != lastRecordText) {
+                    recordButton?.text = recLabel
+                    lastRecordText = recLabel
+                }
+                if (recColor != lastRecordColor) {
+                    recordBtnDrawable?.setColor(recColor)
+                    lastRecordColor = recColor
+                }
+            }
         }
     }
 
-    private fun createActionChip(label: String, hexColor: String, onClick: () -> Unit): TextView {
+    private fun clampPosition(rawX: Int, rawY: Int, view: View): Pair<Int, Int> {
+        val viewW = if (view.width > 0) view.width else view.measuredWidth
+        val viewH = if (view.height > 0) view.height else view.measuredHeight
+        val (minX, minY, maxX, maxY) = currentSafeDisplayBounds()
+        val clampedX = rawX.coerceIn(minX, (maxX - viewW).coerceAtLeast(minX))
+        val clampedY = rawY.coerceIn(minY, (maxY - viewH).coerceAtLeast(minY))
+        return clampedX to clampedY
+    }
+
+    private data class DisplayBounds(
+        val left: Int,
+        val top: Int,
+        val right: Int,
+        val bottom: Int,
+    )
+
+    private fun currentSafeDisplayBounds(): DisplayBounds {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val metrics = windowManager.currentWindowMetrics
+            val bounds = metrics.bounds
+            val cutout = metrics.windowInsets.getInsetsIgnoringVisibility(
+                WindowInsets.Type.displayCutout(),
+            )
+            DisplayBounds(
+                left = cutout.left,
+                top = cutout.top,
+                right = bounds.width() - cutout.right,
+                bottom = bounds.height() - cutout.bottom,
+            )
+        } else {
+            val dm = DisplayMetrics()
+            @Suppress("DEPRECATION")
+            windowManager.defaultDisplay.getRealMetrics(dm)
+            val cutout = rootView?.rootWindowInsets?.displayCutout
+            val insetLeft = cutout?.safeInsetLeft ?: 0
+            val insetTop = cutout?.safeInsetTop ?: 0
+            val insetRight = cutout?.safeInsetRight ?: 0
+            val insetBottom = cutout?.safeInsetBottom ?: 0
+            DisplayBounds(
+                left = insetLeft,
+                top = insetTop,
+                right = (dm.widthPixels - insetRight).coerceAtLeast(insetLeft),
+                bottom = (dm.heightPixels - insetBottom).coerceAtLeast(insetTop),
+            )
+        }
+    }
+
+    private fun resetRenderCache() {
+        appliedOpacity = Float.NaN
+        appliedScale = Float.NaN
+        appliedDotColor = 0
+        lastMiniText = null
+        lastExtraText = null
+        lastPauseVisible = null
+        lastPauseText = null
+        lastPauseColor = 0
+        lastRecordText = null
+        lastRecordColor = 0
+        lastAppliedSettingsX = Int.MIN_VALUE
+        lastAppliedSettingsY = Int.MIN_VALUE
+    }
+
+    private fun createActionChip(
+        label: String,
+        bgDrawable: GradientDrawable,
+        onClick: () -> Unit,
+    ): TextView {
         return TextView(context).apply {
             text = label
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             setPadding(dp(12), dp(6), dp(12), dp(6))
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.RECTANGLE
-                cornerRadius = dp(10).toFloat()
-                setColor(Color.parseColor(hexColor))
-            }
+            background = bgDrawable
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -300,24 +563,34 @@ class FloatingOverlayController(
         }
     }
 
-    private fun createPillBackground(opacity: Float): GradientDrawable {
+    private fun createChipDrawable(color: Int): GradientDrawable =
+        GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(10).toFloat()
+            setColor(color)
+        }
+
+    private fun createPillBackground(opacity: Float): GradientDrawable =
+        GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(18).toFloat()
+            updatePillDrawable(this, opacity)
+        }
+
+    private fun updatePillDrawable(drawable: GradientDrawable?, opacity: Float) {
+        if (drawable == null) return
         val alphaInt = (opacity.coerceIn(0.35f, 1.0f) * 255).roundToInt()
         val bgColor = Color.argb(alphaInt, 11, 18, 26)
         val borderColor = Color.argb((alphaInt * 0.9f).roundToInt().coerceAtMost(255), 56, 189, 248)
-        return GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE
-            cornerRadius = dp(18).toFloat()
-            setColor(bgColor)
-            setStroke(dp(1), borderColor)
-        }
+        drawable.setColor(bgColor)
+        drawable.setStroke(dp(1), borderColor)
     }
 
-    private fun createDotBackground(color: Int): GradientDrawable {
-        return GradientDrawable().apply {
+    private fun createDotBackground(color: Int): GradientDrawable =
+        GradientDrawable().apply {
             shape = GradientDrawable.OVAL
             setColor(color)
         }
-    }
 
     private fun dp(value: Int): Int =
         TypedValue.applyDimension(
@@ -325,4 +598,15 @@ class FloatingOverlayController(
             value.toFloat(),
             context.resources.displayMetrics,
         ).roundToInt()
+
+    companion object {
+        private val COLOR_ACTIVE_GREEN = Color.parseColor("#22C55E")
+        private val COLOR_SAVE_GREEN = Color.parseColor("#16A34A")
+        private val COLOR_CONNECTED_SKY = Color.parseColor("#38BDF8")
+        private val COLOR_SKY = Color.parseColor("#0EA5E9")
+        private val COLOR_AMBER = Color.parseColor("#F59E0B")
+        private val COLOR_DISCONNECTED = Color.parseColor("#EF4444")
+        private val COLOR_SLATE_CHIP = Color.parseColor("#334155")
+        private val COLOR_CLOSE_CHIP = Color.parseColor("#7F1D1D")
+    }
 }

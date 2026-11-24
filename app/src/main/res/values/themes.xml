@@ -1,6 +1,5 @@
 <resources>
     <style name="Theme.WaterRowerTracker" parent="android:Theme.Material.NoActionBar">
-        <item name="android:statusBarColor">#0B121A</item>
-        <item name="android:navigationBarColor">#0B121A</item>
+        <item name="android:windowBackground">#091017</item>
     </style>
 </resources>

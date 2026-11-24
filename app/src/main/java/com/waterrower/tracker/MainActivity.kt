@@ -3,49 +3,78 @@ package com.waterrower.tracker
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color as AndroidColor
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
-import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Bluetooth
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Rowing
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarDefaults
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationRail
+import androidx.compose.material3.NavigationRailDefaults
 import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.waterrower.tracker.data.RecordingState
 import com.waterrower.tracker.service.RowingForegroundService
 import com.waterrower.tracker.ui.DashboardScreen
 import com.waterrower.tracker.ui.HistoryScreen
 import com.waterrower.tracker.ui.SettingsScreen
 import com.waterrower.tracker.ui.WorkoutDetailScreen
+import com.waterrower.tracker.ui.theme.LocalRowingColors
 import com.waterrower.tracker.ui.theme.WaterRowerTheme
+import kotlinx.coroutines.launch
 
 private enum class AppTab(val label: String, val icon: ImageVector) {
     ROWING("Rudern", Icons.Rounded.Rowing),
@@ -53,68 +82,181 @@ private enum class AppTab(val label: String, val icon: ImageVector) {
     SETTINGS("Einstellungen", Icons.Rounded.Settings),
 }
 
+private data class BlePermissionDialogState(
+    val permanentlyDenied: Boolean,
+)
+
 class MainActivity : ComponentActivity() {
 
     private val app get() = application as WaterRowerApp
     private var pendingAfterPermissions: (() -> Unit)? = null
+    private var hasRequestedNotificationPermission = false
+    private var permissionDialogState by mutableStateOf<BlePermissionDialogState?>(null)
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { results ->
-        val allGranted = results.values.all { it }
-        if (allGranted) {
-            pendingAfterPermissions?.invoke()
+        val notifDenied = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            results.containsKey(Manifest.permission.POST_NOTIFICATIONS) &&
+            results[Manifest.permission.POST_NOTIFICATIONS] == false
+
+        if (hasCoreBlePermissions()) {
+            val action = pendingAfterPermissions
+            pendingAfterPermissions = null
+            permissionDialogState = null
+            action?.invoke()
+            if (notifDenied) {
+                app.sessionHub.emitUiMessage(
+                    "Tracking aktiv – Benachrichtigungen sind deaktiviert und können in den App-Einstellungen aktiviert werden.",
+                )
+            }
         } else {
-            Toast.makeText(
-                this,
-                "Bluetooth-/Benachrichtigungs-Berechtigungen sind für das Tracking erforderlich.",
-                Toast.LENGTH_LONG,
-            ).show()
+            val permanentlyDenied = coreBlePermissions().any { perm ->
+                ContextCompat.checkSelfPermission(this, perm) != PackageManager.PERMISSION_GRANTED &&
+                    !shouldShowRequestPermissionRationale(perm)
+            }
+            if (permanentlyDenied) {
+                pendingAfterPermissions = null
+            }
+            permissionDialogState = BlePermissionDialogState(permanentlyDenied = permanentlyDenied)
         }
-        pendingAfterPermissions = null
+    }
+
+    private val optionalNotificationLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (!granted) {
+            app.sessionHub.emitUiMessage(
+                "Benachrichtigungen sind optional – Bluetooth-Tracking funktioniert weiterhin.",
+            )
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        hasRequestedNotificationPermission =
+            savedInstanceState?.getBoolean(KEY_REQUESTED_NOTIFICATION_PERMISSION, false) ?: false
 
         setContent {
-            WaterRowerTheme {
+            val darkTheme = isSystemInDarkTheme()
+            DisposableEffect(darkTheme) {
+                enableEdgeToEdge(
+                    statusBarStyle = if (darkTheme) {
+                        SystemBarStyle.dark(AndroidColor.TRANSPARENT)
+                    } else {
+                        SystemBarStyle.light(AndroidColor.TRANSPARENT, AndroidColor.TRANSPARENT)
+                    },
+                    navigationBarStyle = if (darkTheme) {
+                        SystemBarStyle.dark(AndroidColor.TRANSPARENT)
+                    } else {
+                        SystemBarStyle.light(AndroidColor.TRANSPARENT, AndroidColor.TRANSPARENT)
+                    },
+                )
+                onDispose {}
+            }
+
+            WaterRowerTheme(darkTheme = darkTheme) {
                 WaterRowerRoot(
                     activity = this,
+                    permissionDialogState = permissionDialogState,
+                    onDismissPermissionDialog = {
+                        pendingAfterPermissions = null
+                        permissionDialogState = null
+                    },
+                    onRetryBlePermissions = {
+                        permissionDialogState = null
+                        permissionLauncher.launch(coreBlePermissions())
+                    },
+                    onOpenAppSettings = {
+                        pendingAfterPermissions = null
+                        permissionDialogState = null
+                        openAppSettings()
+                    },
                     onRequestBleAndRun = { action -> runWithBlePermissions(action) },
+                    onStartSimulator = { startOrReconnectSimulator(reconnect = false) },
+                    onReconnectSimulator = { startOrReconnectSimulator(reconnect = true) },
                     onToggleOverlay = { handleToggleOverlay() },
+                    onResetOverlayPosition = { handleResetOverlayPosition() },
                 )
             }
         }
     }
 
-    private fun requiredBlePermissions(): Array<String> {
-        val perms = mutableListOf<String>()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            perms += Manifest.permission.BLUETOOTH_SCAN
-            perms += Manifest.permission.BLUETOOTH_CONNECT
-        } else {
-            perms += Manifest.permission.ACCESS_FINE_LOCATION
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            perms += Manifest.permission.POST_NOTIFICATIONS
-        }
-        return perms.toTypedArray()
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putBoolean(KEY_REQUESTED_NOTIFICATION_PERMISSION, hasRequestedNotificationPermission)
     }
 
-    private fun hasAllPermissions(perms: Array<String>): Boolean =
-        perms.all {
+    private fun coreBlePermissions(): Array<String> {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            arrayOf(
+                Manifest.permission.BLUETOOTH_SCAN,
+                Manifest.permission.BLUETOOTH_CONNECT,
+            )
+        } else {
+            arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+    }
+
+    private fun hasCoreBlePermissions(): Boolean =
+        coreBlePermissions().all {
             ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
         }
 
+    private fun hasNotificationPermission(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.POST_NOTIFICATIONS,
+            ) == PackageManager.PERMISSION_GRANTED
+
     private fun runWithBlePermissions(action: () -> Unit) {
-        val needed = requiredBlePermissions()
-        if (hasAllPermissions(needed)) {
+        if (hasCoreBlePermissions()) {
             action()
+            // Request optional notification permission non-blockingly at most once
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                !hasRequestedNotificationPermission &&
+                !hasNotificationPermission()
+            ) {
+                hasRequestedNotificationPermission = true
+                optionalNotificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
         } else {
             pendingAfterPermissions = action
-            permissionLauncher.launch(needed)
+            val toRequest = buildList {
+                addAll(coreBlePermissions())
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                    !hasRequestedNotificationPermission &&
+                    !hasNotificationPermission()
+                ) {
+                    hasRequestedNotificationPermission = true
+                    add(Manifest.permission.POST_NOTIFICATIONS)
+                }
+            }.toTypedArray()
+            permissionLauncher.launch(toRequest)
         }
+    }
+
+    private fun startOrReconnectSimulator(reconnect: Boolean) {
+        val hub = app.sessionHub
+        // Allow in-app simulator without blocking on BLE permissions; start FGS if already permitted
+        if (hasCoreBlePermissions()) {
+            RowingForegroundService.startService(this)
+        }
+        if (reconnect) {
+            hub.connectSimulator()
+        } else {
+            hub.setSimulatorMode(true)
+        }
+    }
+
+    private fun openAppSettings() {
+        val intent = Intent(
+            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            Uri.fromParts("package", packageName, null),
+        )
+        startActivity(intent)
     }
 
     private fun handleToggleOverlay() {
@@ -125,11 +267,7 @@ class MainActivity : ComponentActivity() {
         }
 
         if (!Settings.canDrawOverlays(this)) {
-            Toast.makeText(
-                this,
-                "Bitte erlaube „Über anderen Apps einblenden“ für WaterRower Tracker.",
-                Toast.LENGTH_LONG,
-            ).show()
+            hub.emitUiMessage("Bitte erlaube „Über anderen Apps einblenden“ für WaterRower Tracker.")
             val intent = Intent(
                 Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
                 Uri.parse("package:$packageName"),
@@ -142,13 +280,35 @@ class MainActivity : ComponentActivity() {
             RowingForegroundService.startService(this, RowingForegroundService.ACTION_SHOW_OVERLAY)
         }
     }
+
+    private fun handleResetOverlayPosition() {
+        app.preferences.resetOverlayPosition()
+        if (app.sessionHub.isOverlayVisible.value) {
+            RowingForegroundService.startService(
+                this,
+                RowingForegroundService.ACTION_RESET_OVERLAY_POSITION,
+            )
+        }
+        app.sessionHub.emitUiMessage("Overlay-Position wurde zurückgesetzt.")
+    }
+
+    companion object {
+        private const val KEY_REQUESTED_NOTIFICATION_PERMISSION = "requested_notification_permission"
+    }
 }
 
 @Composable
 private fun WaterRowerRoot(
     activity: MainActivity,
+    permissionDialogState: BlePermissionDialogState?,
+    onDismissPermissionDialog: () -> Unit,
+    onRetryBlePermissions: () -> Unit,
+    onOpenAppSettings: () -> Unit,
     onRequestBleAndRun: (() -> Unit) -> Unit,
+    onStartSimulator: () -> Unit,
+    onReconnectSimulator: () -> Unit,
     onToggleOverlay: () -> Unit,
+    onResetOverlayPosition: () -> Unit,
 ) {
     val app = activity.application as WaterRowerApp
     val hub = app.sessionHub
@@ -168,58 +328,121 @@ private fun WaterRowerRoot(
     var selectedTab by rememberSaveable { mutableStateOf(AppTab.ROWING) }
     var selectedWorkoutId by rememberSaveable { mutableStateOf<String?>(null) }
 
-    Surface(
-        color = MaterialTheme.colorScheme.background,
-        modifier = Modifier
-            .fillMaxSize()
-            .safeDrawingPadding(),
-    ) {
-        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-        val useRail = maxWidth >= 600.dp
+    val snackbarHostState = remember { SnackbarHostState() }
+    val uiScope = rememberCoroutineScope()
+    val showMessage: (String) -> Unit = remember(snackbarHostState, uiScope) {
+        { msg ->
+            uiScope.launch {
+                snackbarHostState.currentSnackbarData?.dismiss()
+                snackbarHostState.showSnackbar(msg)
+            }
+        }
+    }
 
-        if (useRail) {
-            Row(modifier = Modifier.fillMaxSize()) {
-                NavigationRail {
-                    AppTab.entries.forEach { tab ->
-                        NavigationRailItem(
-                            selected = selectedTab == tab,
-                            onClick = {
-                                selectedTab = tab
-                                selectedWorkoutId = null
-                            },
-                            icon = { Icon(tab.icon, contentDescription = tab.label) },
-                            label = { Text(tab.label) },
-                        )
-                    }
-                }
-                Box(modifier = Modifier.weight(1f)) {
-                    TabContent(
-                        selectedTab = selectedTab,
-                        selectedWorkoutId = selectedWorkoutId,
-                        onSelectWorkout = { selectedWorkoutId = it },
-                        onBackFromDetail = { selectedWorkoutId = null },
-                        connectionState = connectionState,
-                        telemetry = telemetry,
-                        batteryPercent = batteryPercent,
-                        scannedDevices = scannedDevices,
-                        diagnostics = diagnostics,
-                        recordingState = recordingState,
-                        isOverlayVisible = isOverlayVisible,
-                        isSimulatorMode = isSimulatorMode,
-                        settings = settings,
-                        workouts = workouts,
-                        activity = activity,
-                        onRequestBleAndRun = onRequestBleAndRun,
-                        onToggleOverlay = onToggleOverlay,
+    LaunchedEffect(hub) {
+        hub.uiMessages.collect { message ->
+            snackbarHostState.currentSnackbarData?.dismiss()
+            snackbarHostState.showSnackbar(message)
+        }
+    }
+
+    if (permissionDialogState != null) {
+        AlertDialog(
+            onDismissRequest = onDismissPermissionDialog,
+            icon = {
+                Icon(
+                    imageVector = Icons.Rounded.Bluetooth,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+            },
+            title = { Text("Bluetooth-Berechtigung erforderlich") },
+            text = {
+                Text(
+                    text = if (permissionDialogState.permanentlyDenied) {
+                        "Für die Verbindung zum WaterRower S4 Comms 61 und den Tracking-Dienst wird die Bluetooth-Berechtigung benötigt. Bitte aktiviere sie in den App-Einstellungen."
+                    } else {
+                        "Für die Suche nach deinem WaterRower S4 Comms 61 und den Hintergrund-Tracking-Dienst wird die Bluetooth-Berechtigung benötigt."
+                    },
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = if (permissionDialogState.permanentlyDenied) {
+                        onOpenAppSettings
+                    } else {
+                        onRetryBlePermissions
+                    },
+                ) {
+                    Text(
+                        if (permissionDialogState.permanentlyDenied) {
+                            "App-Einstellungen öffnen"
+                        } else {
+                            "Berechtigung anfragen"
+                        },
                     )
                 }
-            }
-        } else {
-            Scaffold(
-                bottomBar = {
-                    NavigationBar {
+            },
+            dismissButton = {
+                TextButton(onClick = onDismissPermissionDialog) {
+                    Text("Abbrechen")
+                }
+            },
+        )
+    }
+
+    Surface(
+        color = MaterialTheme.colorScheme.background,
+        modifier = Modifier.fillMaxSize(),
+    ) {
+        val rowingColors = LocalRowingColors.current
+        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+            val useRail = maxWidth >= 600.dp
+
+            if (useRail) {
+                Row(modifier = Modifier.fillMaxSize()) {
+                    NavigationRail(
+                        containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                        windowInsets = NavigationRailDefaults.windowInsets,
+                        header = {
+                            Box(
+                                contentAlignment = Alignment.Center,
+                                modifier = Modifier.padding(top = 8.dp, bottom = 8.dp),
+                            ) {
+                                Box(
+                                    contentAlignment = Alignment.Center,
+                                    modifier = Modifier
+                                        .size(44.dp)
+                                        .clip(CircleShape)
+                                        .background(MaterialTheme.colorScheme.primaryContainer),
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Rowing,
+                                        contentDescription = "WaterRower Tracker",
+                                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                        modifier = Modifier.size(24.dp),
+                                    )
+                                }
+                                if (recordingState is RecordingState.Active) {
+                                    val dotColor = if ((recordingState as RecordingState.Active).isPaused) {
+                                        rowingColors.warning
+                                    } else {
+                                        rowingColors.recording
+                                    }
+                                    Box(
+                                        modifier = Modifier
+                                            .align(Alignment.TopEnd)
+                                            .size(11.dp)
+                                            .clip(CircleShape)
+                                            .background(dotColor),
+                                    )
+                                }
+                            }
+                            Spacer(Modifier.height(4.dp))
+                        },
+                    ) {
                         AppTab.entries.forEach { tab ->
-                            NavigationBarItem(
+                            NavigationRailItem(
                                 selected = selectedTab == tab,
                                 onClick = {
                                     selectedTab = tab
@@ -230,32 +453,104 @@ private fun WaterRowerRoot(
                             )
                         }
                     }
-                },
-            ) { innerPadding ->
-                Box(modifier = Modifier.padding(innerPadding)) {
-                    TabContent(
-                        selectedTab = selectedTab,
-                        selectedWorkoutId = selectedWorkoutId,
-                        onSelectWorkout = { selectedWorkoutId = it },
-                        onBackFromDetail = { selectedWorkoutId = null },
-                        connectionState = connectionState,
-                        telemetry = telemetry,
-                        batteryPercent = batteryPercent,
-                        scannedDevices = scannedDevices,
-                        diagnostics = diagnostics,
-                        recordingState = recordingState,
-                        isOverlayVisible = isOverlayVisible,
-                        isSimulatorMode = isSimulatorMode,
-                        settings = settings,
-                        workouts = workouts,
-                        activity = activity,
-                        onRequestBleAndRun = onRequestBleAndRun,
-                        onToggleOverlay = onToggleOverlay,
+                    VerticalDivider(
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
                     )
+                    Scaffold(
+                        modifier = Modifier.weight(1f),
+                        containerColor = MaterialTheme.colorScheme.background,
+                        snackbarHost = { SnackbarHost(snackbarHostState) },
+                        contentWindowInsets = WindowInsets.safeDrawing.only(
+                            WindowInsetsSides.Vertical + WindowInsetsSides.End,
+                        ),
+                    ) { innerPadding ->
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(innerPadding),
+                        ) {
+                            TabContent(
+                                selectedTab = selectedTab,
+                                selectedWorkoutId = selectedWorkoutId,
+                                onSelectWorkout = { selectedWorkoutId = it },
+                                onBackFromDetail = { selectedWorkoutId = null },
+                                connectionState = connectionState,
+                                telemetry = telemetry,
+                                batteryPercent = batteryPercent,
+                                scannedDevices = scannedDevices,
+                                diagnostics = diagnostics,
+                                recordingState = recordingState,
+                                isOverlayVisible = isOverlayVisible,
+                                isSimulatorMode = isSimulatorMode,
+                                settings = settings,
+                                workouts = workouts,
+                                activity = activity,
+                                onRequestBleAndRun = onRequestBleAndRun,
+                                onStartSimulator = onStartSimulator,
+                                onReconnectSimulator = onReconnectSimulator,
+                                onToggleOverlay = onToggleOverlay,
+                                onResetOverlayPosition = onResetOverlayPosition,
+                                onShowMessage = showMessage,
+                            )
+                        }
+                    }
+                }
+            } else {
+                Scaffold(
+                    containerColor = MaterialTheme.colorScheme.background,
+                    snackbarHost = { SnackbarHost(snackbarHostState) },
+                    contentWindowInsets = WindowInsets.safeDrawing,
+                    bottomBar = {
+                        NavigationBar(
+                            containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                            windowInsets = NavigationBarDefaults.windowInsets,
+                        ) {
+                            AppTab.entries.forEach { tab ->
+                                NavigationBarItem(
+                                    selected = selectedTab == tab,
+                                    onClick = {
+                                        selectedTab = tab
+                                        selectedWorkoutId = null
+                                    },
+                                    icon = { Icon(tab.icon, contentDescription = tab.label) },
+                                    label = { Text(tab.label) },
+                                )
+                            }
+                        }
+                    },
+                ) { innerPadding ->
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(innerPadding),
+                    ) {
+                        TabContent(
+                            selectedTab = selectedTab,
+                            selectedWorkoutId = selectedWorkoutId,
+                            onSelectWorkout = { selectedWorkoutId = it },
+                            onBackFromDetail = { selectedWorkoutId = null },
+                            connectionState = connectionState,
+                            telemetry = telemetry,
+                            batteryPercent = batteryPercent,
+                            scannedDevices = scannedDevices,
+                            diagnostics = diagnostics,
+                            recordingState = recordingState,
+                            isOverlayVisible = isOverlayVisible,
+                            isSimulatorMode = isSimulatorMode,
+                            settings = settings,
+                            workouts = workouts,
+                            activity = activity,
+                            onRequestBleAndRun = onRequestBleAndRun,
+                            onStartSimulator = onStartSimulator,
+                            onReconnectSimulator = onReconnectSimulator,
+                            onToggleOverlay = onToggleOverlay,
+                            onResetOverlayPosition = onResetOverlayPosition,
+                            onShowMessage = showMessage,
+                        )
+                    }
                 }
             }
         }
-    }
     }
 }
 
@@ -270,14 +565,18 @@ private fun TabContent(
     batteryPercent: Int?,
     scannedDevices: List<com.waterrower.tracker.model.ScannedDevice>,
     diagnostics: com.waterrower.tracker.model.BleDiagnostics,
-    recordingState: com.waterrower.tracker.data.RecordingState,
+    recordingState: RecordingState,
     isOverlayVisible: Boolean,
     isSimulatorMode: Boolean,
     settings: com.waterrower.tracker.data.OverlaySettings,
     workouts: List<com.waterrower.tracker.data.WorkoutEntity>,
     activity: MainActivity,
     onRequestBleAndRun: (() -> Unit) -> Unit,
+    onStartSimulator: () -> Unit,
+    onReconnectSimulator: () -> Unit,
     onToggleOverlay: () -> Unit,
+    onResetOverlayPosition: () -> Unit,
+    onShowMessage: (String) -> Unit,
 ) {
     val app = activity.application as WaterRowerApp
     val hub = app.sessionHub
@@ -306,13 +605,11 @@ private fun TabContent(
                     hub.connect(address, name)
                 }
             },
+            onConnectSimulator = onReconnectSimulator,
             onDisconnect = { hub.disconnect() },
             onToggleSimulator = { enabled ->
                 if (enabled) {
-                    onRequestBleAndRun {
-                        RowingForegroundService.startService(activity)
-                        hub.setSimulatorMode(true)
-                    }
+                    onStartSimulator()
                 } else {
                     hub.setSimulatorMode(false)
                 }
@@ -328,6 +625,7 @@ private fun TabContent(
                     workoutId = selectedWorkoutId,
                     hub = hub,
                     onBack = onBackFromDetail,
+                    onShowMessage = onShowMessage,
                 )
             } else {
                 HistoryScreen(
@@ -343,6 +641,8 @@ private fun TabContent(
             onScaleChange = { prefs.setScale(it) },
             onShowWattsInMiniChange = { prefs.setShowWattsInMini(it) },
             onAutoStartChange = { prefs.setAutoStartRecording(it) },
+            onResetOverlayPosition = onResetOverlayPosition,
+            onShowMessage = onShowMessage,
         )
     }
 }

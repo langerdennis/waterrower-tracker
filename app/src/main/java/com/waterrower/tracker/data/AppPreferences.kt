@@ -12,8 +12,8 @@ data class OverlaySettings(
     val autoStartRecording: Boolean = true,
     val lastDeviceAddress: String? = null,
     val lastDeviceName: String? = null,
-    val overlayX: Int = 36,
-    val overlayY: Int = 36,
+    val overlayX: Int = AppPreferences.DEFAULT_OVERLAY_X,
+    val overlayY: Int = AppPreferences.DEFAULT_OVERLAY_Y,
 )
 
 class AppPreferences(context: Context) {
@@ -29,8 +29,8 @@ class AppPreferences(context: Context) {
         autoStartRecording = prefs.getBoolean(KEY_AUTO_RECORD, true),
         lastDeviceAddress = prefs.getString(KEY_LAST_ADDR, null),
         lastDeviceName = prefs.getString(KEY_LAST_NAME, null),
-        overlayX = prefs.getInt(KEY_OVERLAY_X, 36),
-        overlayY = prefs.getInt(KEY_OVERLAY_Y, 36),
+        overlayX = prefs.getInt(KEY_OVERLAY_X, DEFAULT_OVERLAY_X),
+        overlayY = prefs.getInt(KEY_OVERLAY_Y, DEFAULT_OVERLAY_Y),
     )
 
     fun setOpacity(opacity: Float) {
@@ -74,7 +74,14 @@ class AppPreferences(context: Context) {
         _settings.value = _settings.value.copy(overlayX = x, overlayY = y)
     }
 
+    fun resetOverlayPosition() {
+        saveOverlayPosition(DEFAULT_OVERLAY_X, DEFAULT_OVERLAY_Y)
+    }
+
     companion object {
+        const val DEFAULT_OVERLAY_X = 36
+        const val DEFAULT_OVERLAY_Y = 36
+
         private const val KEY_OPACITY = "overlay_opacity"
         private const val KEY_SCALE = "overlay_scale"
         private const val KEY_SHOW_WATTS = "overlay_show_watts"

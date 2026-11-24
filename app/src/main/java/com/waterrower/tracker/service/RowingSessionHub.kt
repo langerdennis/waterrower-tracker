@@ -19,9 +19,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.stateIn
@@ -37,10 +40,12 @@ class RowingSessionHub(
     private val preferences: AppPreferences,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val recorderLock = Any()
 
     private val bleClient = BleRowerClient(context.applicationContext, scope)
     private val simulatedClient = SimulatedRowerClient(scope)
     private val recorder = WorkoutRecorder()
+    private var hasReceivedTelemetryForConnection = false
 
     private val _isSimulatorMode = MutableStateFlow(false)
     val isSimulatorMode: StateFlow<Boolean> = _isSimulatorMode.asStateFlow()
@@ -54,7 +59,7 @@ class RowingSessionHub(
 
     val telemetry: StateFlow<RowingTelemetry> = activeClient
         .flatMapLatest { it.telemetry }
-        .stateIn(scope, SharingStarted.Eagerly, RowingTelemetry())
+        .stateIn(scope, SharingStarted.Eagerly, RowingTelemetry(timestampMs = 0L))
 
     val batteryPercent: StateFlow<Int?> = activeClient
         .flatMapLatest { it.batteryPercent }
@@ -77,32 +82,67 @@ class RowingSessionHub(
     private val _lastSavedWorkoutId = MutableStateFlow<String?>(null)
     val lastSavedWorkoutId: StateFlow<String?> = _lastSavedWorkoutId.asStateFlow()
 
+    private val _uiMessages = MutableSharedFlow<String>(extraBufferCapacity = 8)
+    val uiMessages: SharedFlow<String> = _uiMessages.asSharedFlow()
+
     val workouts: Flow<List<WorkoutEntity>> = database.workoutDao().observeAllWorkouts()
 
     init {
         scope.launch {
-            telemetry.collect { frame ->
-                if (connectionState.value is ConnectionState.Connected) {
-                    val autoStart = preferences.settings.value.autoStartRecording
-                    val updated = recorder.onTelemetry(
-                        telemetry = frame,
-                        autoStart = autoStart,
-                        isSimulated = _isSimulatorMode.value,
-                    )
-                    _recordingState.value = updated
+            connectionState.collect { conn ->
+                if (conn !is ConnectionState.Connected) {
+                    synchronized(recorderLock) {
+                        hasReceivedTelemetryForConnection = false
+                    }
                 }
             }
+        }
+        scope.launch {
+            telemetry.collect { frame ->
+                if (connectionState.value is ConnectionState.Connected && frame.timestampMs > 0L) {
+                    val autoStart = preferences.settings.value.autoStartRecording
+                    synchronized(recorderLock) {
+                        hasReceivedTelemetryForConnection = true
+                        val updated = recorder.onTelemetry(
+                            telemetry = frame,
+                            autoStart = autoStart,
+                            isSimulated = _isSimulatorMode.value,
+                        )
+                        _recordingState.value = updated
+                    }
+                }
+            }
+        }
+    }
+
+    fun emitUiMessage(message: String) {
+        if (message.isNotBlank()) {
+            _uiMessages.tryEmit(message)
         }
     }
 
     fun setSimulatorMode(enabled: Boolean) {
         if (_isSimulatorMode.value == enabled) return
         _activeClient.value.disconnect()
+        _activeClient.value.resetTelemetry()
+        synchronized(recorderLock) {
+            hasReceivedTelemetryForConnection = false
+            recorder.resetIdleBaseline()
+        }
         _isSimulatorMode.value = enabled
         _activeClient.value = if (enabled) simulatedClient else bleClient
         if (enabled) {
-            simulatedClient.connect("SIM:00:00:00:00:61", "S4 Comms 61 (Simulator)")
+            simulatedClient.connect(SimulatedRowerClient.SIM_ADDRESS, SimulatedRowerClient.SIM_NAME)
         }
+    }
+
+    fun connectSimulator() {
+        if (!_isSimulatorMode.value) return
+        synchronized(recorderLock) {
+            hasReceivedTelemetryForConnection = false
+            recorder.resetIdleBaseline()
+        }
+        simulatedClient.connect(SimulatedRowerClient.SIM_ADDRESS, SimulatedRowerClient.SIM_NAME)
     }
 
     fun startScan() {
@@ -121,28 +161,53 @@ class RowingSessionHub(
         if (!_isSimulatorMode.value) {
             preferences.saveLastDevice(address, deviceName)
         }
+        synchronized(recorderLock) {
+            hasReceivedTelemetryForConnection = false
+            recorder.resetIdleBaseline()
+        }
         activeClient.value.connect(address, deviceName)
     }
 
     fun disconnect() {
+        synchronized(recorderLock) {
+            hasReceivedTelemetryForConnection = false
+            recorder.resetIdleBaseline()
+        }
         activeClient.value.disconnect()
+        activeClient.value.resetTelemetry()
     }
 
     fun startRecording() {
-        val current = telemetry.value
-        _recordingState.value = recorder.start(
-            initialTelemetry = if (connectionState.value is ConnectionState.Connected) current else null,
-            isSimulated = _isSimulatorMode.value,
-        )
+        synchronized(recorderLock) {
+            val current = telemetry.value
+            val initial = if (
+                connectionState.value is ConnectionState.Connected &&
+                hasReceivedTelemetryForConnection &&
+                current.timestampMs > 0L
+            ) {
+                current
+            } else {
+                null
+            }
+            _recordingState.value = recorder.start(
+                initialTelemetry = initial,
+                isSimulated = _isSimulatorMode.value,
+            )
+        }
     }
 
     fun togglePauseRecording() {
-        _recordingState.value = recorder.togglePause()
+        synchronized(recorderLock) {
+            _recordingState.value = recorder.togglePause()
+        }
     }
 
     fun stopAndSaveRecording() {
-        val recorded = recorder.stop()
-        _recordingState.value = RecordingState.Idle
+        val recorded = synchronized(recorderLock) {
+            val result = recorder.stop()
+            _recordingState.value = RecordingState.Idle
+            result
+        }
         if (recorded != null) {
             scope.launch {
                 database.workoutDao().saveWorkoutWithSamples(recorded.workout, recorded.samples)

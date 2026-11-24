@@ -1,6 +1,7 @@
 package com.waterrower.tracker.ble
 
 import com.waterrower.tracker.model.BleDiagnostics
+import com.waterrower.tracker.model.BlePacketEntry
 import com.waterrower.tracker.model.ConnectionState
 import com.waterrower.tracker.model.RowingTelemetry
 import com.waterrower.tracker.model.ScannedDevice
@@ -10,6 +11,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
@@ -26,7 +28,7 @@ class SimulatedRowerClient(
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     override val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
 
-    private val _telemetry = MutableStateFlow(RowingTelemetry())
+    private val _telemetry = MutableStateFlow(RowingTelemetry(timestampMs = 0L))
     override val telemetry: StateFlow<RowingTelemetry> = _telemetry.asStateFlow()
 
     private val _batteryPercent = MutableStateFlow<Int?>(null)
@@ -43,8 +45,8 @@ class SimulatedRowerClient(
     override fun startScan() {
         _scannedDevices.value = listOf(
             ScannedDevice(
-                name = "S4 Comms 61 (Simulator)",
-                address = "SIM:00:00:00:00:61",
+                name = SIM_NAME,
+                address = SIM_ADDRESS,
                 rssi = -45,
                 hasFtmsService = true,
             ),
@@ -56,8 +58,8 @@ class SimulatedRowerClient(
     override fun connect(address: String, deviceName: String) {
         disconnect()
         _connectionState.value = ConnectionState.Connected(
-            deviceName = deviceName.ifBlank { "S4 Comms 61 (Simulator)" },
-            address = address.ifBlank { "SIM:00:00:00:00:61" },
+            deviceName = deviceName.ifBlank { SIM_NAME },
+            address = address.ifBlank { SIM_ADDRESS },
             isSimulated = true,
         )
         _batteryPercent.value = 87
@@ -88,25 +90,48 @@ class SimulatedRowerClient(
                 val watts = (2.80 * speedMps * speedMps * speedMps).roundToInt().coerceIn(80, 350)
                 calories += (watts * 3.6 + 300.0) / 3600.0
                 val hr = (132 + (elapsed / 25).coerceAtMost(24) + (wave * 3).roundToInt())
+                val nowMs = System.currentTimeMillis()
+                val distInt = distanceMeters.roundToInt()
+                val spmRounded = (spm * 2f).roundToInt() / 2f
+                val strokeInt = strokeAccumulator.toInt()
+                val calInt = calories.roundToInt()
 
                 _telemetry.value = RowingTelemetry(
-                    timestampMs = System.currentTimeMillis(),
-                    distanceMeters = distanceMeters.roundToInt(),
+                    timestampMs = nowMs,
+                    distanceMeters = distInt,
                     elapsedSeconds = elapsed,
-                    strokeRateSpm = (spm * 2f).roundToInt() / 2f,
-                    strokeCount = strokeAccumulator.toInt(),
+                    strokeRateSpm = spmRounded,
+                    strokeCount = strokeInt,
                     paceSecondsPer500m = paceSec,
                     avgPaceSecondsPer500m = 124,
                     watts = watts,
                     avgWatts = watts,
-                    calories = calories.roundToInt(),
+                    calories = calInt,
                     heartRateBpm = hr,
                 )
-                _diagnostics.value = _diagnostics.value.copy(
-                    lastRawHex = "SIMULATED FTMS 0x2AD1",
-                    lastParsedFlagsHex = "0x0BAC",
-                    packetCount = elapsed.toLong(),
+
+                val simBytes = encodeSimulatedFtmsFrame(
+                    spm = spmRounded,
+                    strokeCount = strokeInt,
+                    distanceMeters = distInt,
+                    paceSec = paceSec,
+                    watts = watts,
+                    calories = calInt,
+                    heartRate = hr,
+                    elapsedSec = elapsed,
                 )
+                _diagnostics.update { diag ->
+                    diag.appendPacket(
+                        BlePacketEntry(
+                            timestampMs = nowMs,
+                            source = "0x2AD1 (Sim)",
+                            rawHex = FtmsRowerParser.toHexString(simBytes),
+                            flagsHex = "0x%04X".format(SIM_FLAGS),
+                            flagsSummary = FtmsRowerParser.describeFlags(SIM_FLAGS),
+                            isTruncated = false,
+                        ),
+                    )
+                }
             }
         }
     }
@@ -115,10 +140,47 @@ class SimulatedRowerClient(
         simJob?.cancel()
         simJob = null
         _batteryPercent.value = null
+        resetTelemetry()
         _connectionState.value = ConnectionState.Disconnected
     }
 
     override fun resetTelemetry() {
-        _telemetry.value = RowingTelemetry()
+        _telemetry.value = RowingTelemetry(timestampMs = 0L)
+    }
+
+    private fun encodeSimulatedFtmsFrame(
+        spm: Float,
+        strokeCount: Int,
+        distanceMeters: Int,
+        paceSec: Int,
+        watts: Int,
+        calories: Int,
+        heartRate: Int,
+        elapsedSec: Int,
+    ): ByteArray = byteArrayOf(
+        (SIM_FLAGS and 0xFF).toByte(),
+        ((SIM_FLAGS ushr 8) and 0xFF).toByte(),
+        (spm * 2f).roundToInt().coerceIn(0, 255).toByte(),
+        (strokeCount and 0xFF).toByte(),
+        ((strokeCount ushr 8) and 0xFF).toByte(),
+        (distanceMeters and 0xFF).toByte(),
+        ((distanceMeters ushr 8) and 0xFF).toByte(),
+        ((distanceMeters ushr 16) and 0xFF).toByte(),
+        (paceSec and 0xFF).toByte(),
+        ((paceSec ushr 8) and 0xFF).toByte(),
+        (watts and 0xFF).toByte(),
+        ((watts ushr 8) and 0xFF).toByte(),
+        (calories and 0xFF).toByte(),
+        ((calories ushr 8) and 0xFF).toByte(),
+        0x00, 0x00, 0x00,
+        heartRate.coerceIn(0, 255).toByte(),
+        (elapsedSec and 0xFF).toByte(),
+        ((elapsedSec ushr 8) and 0xFF).toByte(),
+    )
+
+    companion object {
+        const val SIM_ADDRESS = "SIM:00:00:00:00:61"
+        const val SIM_NAME = "S4 Comms 61 (Simulator)"
+        private const val SIM_FLAGS = 0x0B2C
     }
 }

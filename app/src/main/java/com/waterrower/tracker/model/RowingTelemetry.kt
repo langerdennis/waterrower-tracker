@@ -1,5 +1,7 @@
 package com.waterrower.tracker.model
 
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 
 data class RowingTelemetry(
@@ -65,10 +67,67 @@ data class ScannedDevice(
     val hasFtmsService: Boolean,
 )
 
+data class BlePacketEntry(
+    val timestampMs: Long,
+    val source: String,
+    val rawHex: String,
+    val flagsHex: String = "",
+    val flagsSummary: String = "",
+    val isTruncated: Boolean = false,
+)
+
 data class BleDiagnostics(
     val discoveredServices: List<String> = emptyList(),
     val lastRawHex: String = "",
     val lastParsedFlagsHex: String = "",
     val packetCount: Long = 0L,
     val firmwareRevision: String? = null,
-)
+    val recentPackets: List<BlePacketEntry> = emptyList(),
+    val truncatedPacketCount: Long = 0L,
+) {
+    fun appendPacket(entry: BlePacketEntry): BleDiagnostics {
+        val updatedRecent = (recentPackets + entry).takeLast(MAX_RECENT_PACKETS)
+        return copy(
+            lastRawHex = entry.rawHex,
+            lastParsedFlagsHex = entry.flagsHex.ifEmpty { lastParsedFlagsHex },
+            packetCount = packetCount + 1L,
+            recentPackets = updatedRecent,
+            truncatedPacketCount = truncatedPacketCount + if (entry.isTruncated) 1L else 0L,
+        )
+    }
+
+    fun formatForClipboard(): String {
+        val timeFmt = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
+        return buildString {
+            appendLine("WaterRower S4 BLE Diagnostics")
+            appendLine("Firmware: ${firmwareRevision ?: "--"}")
+            appendLine("Packets: $packetCount (truncated: $truncatedPacketCount)")
+            appendLine("Last Flags: ${lastParsedFlagsHex.ifBlank { "--" }}")
+            if (discoveredServices.isNotEmpty()) {
+                appendLine("GATT Services:")
+                discoveredServices.forEach { svc -> appendLine("  - $svc") }
+            }
+            appendLine("Recent Packets (max $MAX_RECENT_PACKETS):")
+            if (recentPackets.isEmpty()) {
+                appendLine("  (none)")
+            } else {
+                recentPackets.forEach { p ->
+                    val ts = timeFmt.format(Date(p.timestampMs))
+                    val flagsPart = buildString {
+                        if (p.flagsHex.isNotBlank()) append("flags=${p.flagsHex}")
+                        if (p.flagsSummary.isNotBlank()) {
+                            if (isNotEmpty()) append(' ')
+                            append("(${p.flagsSummary})")
+                        }
+                    }.ifBlank { "--" }
+                    val truncTag = if (p.isTruncated) " [TRUNCATED]" else ""
+                    appendLine("  $ts | ${p.source} | $flagsPart | ${p.rawHex}$truncTag")
+                }
+            }
+        }.trimEnd()
+    }
+
+    companion object {
+        const val MAX_RECENT_PACKETS = 10
+    }
+}
