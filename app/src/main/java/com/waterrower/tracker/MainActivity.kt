@@ -246,6 +246,13 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         healthConnectAvailability = HealthConnectSyncManager.availability(this)
+        if (app.preferences.settings.value.healthConnectSyncEnabled) {
+            lifecycleScope.launch {
+                if (!HealthConnectSyncManager.hasAllPermissions(this@MainActivity)) {
+                    app.preferences.setHealthConnectSyncEnabled(false)
+                }
+            }
+        }
         val ready = updateState as? UpdateUiState.ReadyToInstall
         if (ready != null && ready.needsInstallPermission && packageManager.canRequestPackageInstalls()) {
             updateState = ready.copy(needsInstallPermission = false)

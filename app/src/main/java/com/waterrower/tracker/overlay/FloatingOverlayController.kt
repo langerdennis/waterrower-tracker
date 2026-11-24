@@ -7,6 +7,8 @@ import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
 import android.text.SpannableStringBuilder
@@ -58,6 +60,7 @@ class FloatingOverlayController(
     private val onCloseOverlay: () -> Unit,
 ) {
     private val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     private var rootView: LinearLayout? = null
     private var layoutParams: WindowManager.LayoutParams? = null
@@ -109,6 +112,17 @@ class FloatingOverlayController(
 
     private var idleSinceElapsedMs: Long? = null
     private var isAutoDimmed: Boolean = false
+    private var autoDimScheduled: Boolean = false
+    private val autoDimRunnable = Runnable {
+        autoDimScheduled = false
+        val root = rootView ?: return@Runnable
+        val inActiveOffRowerOrRest = lastProgram != null && !lastProgram!!.isCompleted &&
+            (lastProgram!!.currentStep is ProgramStep.TimedRest ||
+                lastProgram!!.currentStep is ProgramStep.OffRowerStation)
+        if (!isExpanded && lastTelemetry.strokeRateSpm <= 0f && !inActiveOffRowerOrRest) {
+            setAutoDimmed(root, true)
+        }
+    }
 
     private var isExpanded = false
     private var lastTelemetry = RowingTelemetry()
@@ -319,6 +333,8 @@ class FloatingOverlayController(
                     initialTouchY = event.rawY
                     moved = false
                     // Wake immediately on touch
+                    mainHandler.removeCallbacks(autoDimRunnable)
+                    autoDimScheduled = false
                     idleSinceElapsedMs = null
                     setAutoDimmed(container, false)
                     true
@@ -395,6 +411,8 @@ class FloatingOverlayController(
     }
 
     fun hide() {
+        mainHandler.removeCallbacks(autoDimRunnable)
+        autoDimScheduled = false
         val view = rootView ?: return
         try {
             windowManager.removeView(view)
@@ -524,12 +542,24 @@ class FloatingOverlayController(
             inActiveOffRowerOrRest
         val nowElapsed = SystemClock.elapsedRealtime()
         if (shouldStayBright) {
+            if (autoDimScheduled) {
+                mainHandler.removeCallbacks(autoDimRunnable)
+                autoDimScheduled = false
+            }
             idleSinceElapsedMs = null
             setAutoDimmed(root, false)
         } else {
             val startedIdle = idleSinceElapsedMs ?: nowElapsed.also { idleSinceElapsedMs = it }
-            if (nowElapsed - startedIdle >= IDLE_AUTO_DIM_MS) {
+            val elapsedIdle = nowElapsed - startedIdle
+            if (elapsedIdle >= IDLE_AUTO_DIM_MS) {
+                if (autoDimScheduled) {
+                    mainHandler.removeCallbacks(autoDimRunnable)
+                    autoDimScheduled = false
+                }
                 setAutoDimmed(root, true)
+            } else if (!autoDimScheduled) {
+                autoDimScheduled = true
+                mainHandler.postDelayed(autoDimRunnable, IDLE_AUTO_DIM_MS - elapsedIdle)
             }
         }
 

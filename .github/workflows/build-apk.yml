@@ -1,4 +1,4 @@
-name: Build WaterRower Tracker APK
+name: Build WaterRower APK
 
 on:
   push:
@@ -17,18 +17,18 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 17
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: '8.11.1'
 
@@ -97,17 +97,17 @@ jobs:
 
       - name: Upload Signed Release APK artifact
         if: steps.signing.outputs.enabled == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: waterrower-tracker-release-apk
+          name: waterrower-release-apk
           path: app/build/outputs/apk/release/app-release.apk
           retention-days: 30
 
       - name: Upload Debug APK artifact
         if: steps.signing.outputs.enabled != 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: waterrower-tracker-debug-apk
+          name: waterrower-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
           retention-days: 30
 
@@ -126,5 +126,3 @@ jobs:
           gh release create "$GITHUB_REF_NAME" "$APK_NAME" \
             --title "${GITHUB_REF_NAME} — WaterRower" \
             --generate-notes
-
-
