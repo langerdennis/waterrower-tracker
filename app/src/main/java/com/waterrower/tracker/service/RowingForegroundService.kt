@@ -88,13 +88,27 @@ class RowingForegroundService : LifecycleService() {
         }
 
         lifecycleScope.launch {
+            val ghostAndWeekly = combine(
+                hub.ghostDelta,
+                hub.ghostReference,
+                hub.savedWeeklyDistanceMeters,
+            ) { delta, ref, weeklyM ->
+                Triple(delta, ref?.totalDistanceMeters, weeklyM)
+            }
             val trainingExtras = combine(
                 hub.activeGoal,
-                hub.ghostDelta,
                 hub.activeProgram,
                 hub.batteryPercent,
-            ) { goal, ghost, program, battery ->
-                TrainingExtras(goal, ghost, program, battery)
+                ghostAndWeekly,
+            ) { goal, program, battery, gw ->
+                TrainingExtras(
+                    goal = goal,
+                    ghost = gw.first,
+                    ghostTotalMeters = gw.second,
+                    program = program,
+                    batteryPercent = battery,
+                    savedWeeklyDistanceMeters = gw.third,
+                )
             }
             combine(
                 hub.telemetry,
@@ -113,8 +127,10 @@ class RowingForegroundService : LifecycleService() {
                     overlayVisible = extras.first,
                     goal = extras.second.goal,
                     ghostDelta = extras.second.ghost,
+                    ghostTotalMeters = extras.second.ghostTotalMeters,
                     program = extras.second.program,
                     batteryPercent = extras.second.batteryPercent,
+                    savedWeeklyDistanceMeters = extras.second.savedWeeklyDistanceMeters,
                 )
             }.collect { snap ->
                 val isConnected = snap.connection is ConnectionState.Connected
@@ -139,8 +155,10 @@ class RowingForegroundService : LifecycleService() {
                         settings = snap.settings,
                         goal = snap.goal,
                         ghostDelta = snap.ghostDelta,
+                        ghostTotalMeters = snap.ghostTotalMeters,
                         program = snap.program,
                         batteryPercent = snap.batteryPercent,
+                        savedWeeklyDistanceMeters = snap.savedWeeklyDistanceMeters,
                     )
                 }
                 checkGoalCompletionCue(snap)
@@ -445,8 +463,10 @@ class RowingForegroundService : LifecycleService() {
     private data class TrainingExtras(
         val goal: WorkoutGoal,
         val ghost: GhostDelta?,
+        val ghostTotalMeters: Int?,
         val program: ProgramProgressState?,
         val batteryPercent: Int?,
+        val savedWeeklyDistanceMeters: Int,
     )
 
     private data class OverlaySnapshot(
@@ -457,8 +477,10 @@ class RowingForegroundService : LifecycleService() {
         val overlayVisible: Boolean,
         val goal: WorkoutGoal,
         val ghostDelta: GhostDelta?,
+        val ghostTotalMeters: Int?,
         val program: ProgramProgressState?,
         val batteryPercent: Int?,
+        val savedWeeklyDistanceMeters: Int,
     )
 
     companion object {

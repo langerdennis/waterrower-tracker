@@ -1042,7 +1042,7 @@ private fun TabContent(
             onOpacityChange = { prefs.setOpacity(it) },
             onScaleChange = { prefs.setScale(it) },
             onOverlayStyleChange = { prefs.setOverlayStyle(it) },
-            onCompactOverlayChange = { prefs.setCompactOverlayMode(it) },
+            onOverlayContentModeChange = { prefs.setOverlayContentMode(it) },
             onOverlayLockChange = { prefs.setOverlayPositionLocked(it) },
             onShowWattsInMiniChange = { prefs.setShowWattsInMini(it) },
             onAutoStartChange = { prefs.setAutoStartRecording(it) },

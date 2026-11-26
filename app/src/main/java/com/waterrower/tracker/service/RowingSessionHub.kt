@@ -146,6 +146,16 @@ class RowingSessionHub(
 
     val workouts: Flow<List<WorkoutEntity>> = database.workoutDao().observeAllWorkouts()
 
+    val savedWeeklyDistanceMeters: StateFlow<Int> = combine(
+        workouts,
+        isSimulatorMode,
+    ) { allWorkouts, simMode ->
+        val cutoff = System.currentTimeMillis() - SEVEN_DAYS_MS
+        allWorkouts
+            .filter { w -> w.startedAtEpochMs >= cutoff && (simMode || !w.isSimulated) }
+            .sumOf { it.totalDistanceMeters }
+    }.stateIn(scope, SharingStarted.Eagerly, 0)
+
     init {
         scope.launch {
             connectionState.collect { conn ->
@@ -518,5 +528,9 @@ class RowingSessionHub(
         scope.launch {
             database.workoutDao().deleteWorkout(workoutId)
         }
+    }
+
+    companion object {
+        private const val SEVEN_DAYS_MS = 7L * 24L * 60L * 60L * 1_000L
     }
 }

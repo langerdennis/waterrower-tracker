@@ -2,8 +2,11 @@ package com.waterrower.tracker.overlay
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.PixelFormat
+import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
@@ -24,6 +27,7 @@ import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.waterrower.tracker.data.AppPreferences
+import com.waterrower.tracker.data.OverlayContentMode
 import com.waterrower.tracker.data.OverlaySettings
 import com.waterrower.tracker.data.OverlayStyle
 import com.waterrower.tracker.data.RecordingState
@@ -42,12 +46,11 @@ import kotlin.math.roundToInt
  * Lightweight, crash-proof native WindowManager overlay designed to float over
  * fullscreen video and streaming apps on Android tablets and phones.
  *
- * - Touch events outside the pill pass straight through to the underlying app.
- * - Drag anywhere on screen (clamped to screen & display cutout bounds, position persisted)
- *   unless locked via [OverlaySettings.overlayPositionLocked].
- * - Supports 3 visual styles (Standard, Cinema, Transparent), Ultra-Compact mode,
- *   low-battery alert for the S4 ComModule, and gentle auto-dimming after 15s of idle flywheel.
- * - Tap to toggle between compact Mini-Pill and Expanded Controls.
+ * Supports 4 content modes tailored around watching series while rowing:
+ * - [OverlayContentMode.SMART]: S4-exclusive context only (ETA, projection, pace trend vs. avg, live weekly %, programs).
+ * - [OverlayContentMode.CINEMA_TOAST]: Tiny unobtrusive status dot that pops open for 6s at 500m splits & program/goal events.
+ * - [OverlayContentMode.PROGRESS_BAR]: Visual filling progress bar or live 2-marker Ghost Race track with micro-caption.
+ * - [OverlayContentMode.TELEMETRY]: Classic full S4 telemetry (great in dark rooms without S4 backlight).
  */
 class FloatingOverlayController(
     private val context: Context,
@@ -66,6 +69,8 @@ class FloatingOverlayController(
     private var layoutParams: WindowManager.LayoutParams? = null
     private var statusDot: View? = null
     private var miniLineView: TextView? = null
+    private var visualBarView: VisualBarView? = null
+    private var barCaptionView: TextView? = null
     private var progressTrack: LinearLayout? = null
     private var progressFill: View? = null
     private var progressRemainder: View? = null
@@ -74,7 +79,7 @@ class FloatingOverlayController(
     private var nextStepButton: TextView? = null
     private var pauseButton: TextView? = null
     private var recordButton: TextView? = null
-    private var compactToggleButton: TextView? = null
+    private var modeToggleButton: TextView? = null
     private var lockToggleButton: TextView? = null
     private var styleToggleButton: TextView? = null
 
@@ -83,7 +88,7 @@ class FloatingOverlayController(
     private var progressFillDrawable: GradientDrawable? = null
     private var pauseBtnDrawable: GradientDrawable? = null
     private var recordBtnDrawable: GradientDrawable? = null
-    private var compactBtnDrawable: GradientDrawable? = null
+    private var modeBtnDrawable: GradientDrawable? = null
     private var lockBtnDrawable: GradientDrawable? = null
     private var styleBtnDrawable: GradientDrawable? = null
 
@@ -93,10 +98,15 @@ class FloatingOverlayController(
     private var appliedExpandedForBg: Boolean? = null
     private var appliedScale: Float = Float.NaN
     private var appliedDotColor: Int = 0
+    private var appliedDotMarginEnd: Int = -1
     private var appliedProgressVisible: Boolean? = null
     private var appliedProgressPermille: Int = -1
     private var appliedProgressColor: Int = 0
+    private var lastMiniVisible: Boolean? = null
     private var lastMiniKey: String? = null
+    private var lastBarModeVisible: Boolean? = null
+    private var lastBarCaption: String? = null
+    private var lastBarCaptionColor: Int = 0
     private var lastExtraText: String? = null
     private var lastNextStepVisible: Boolean? = null
     private var lastPauseVisible: Boolean? = null
@@ -104,12 +114,13 @@ class FloatingOverlayController(
     private var lastPauseColor: Int = 0
     private var lastRecordText: String? = null
     private var lastRecordColor: Int = 0
-    private var lastCompactMode: Boolean? = null
+    private var lastModeButtonMode: OverlayContentMode? = null
     private var lastLockedMode: Boolean? = null
     private var lastStyleButtonStyle: OverlayStyle? = null
     private var lastAppliedSettingsX: Int = Int.MIN_VALUE
     private var lastAppliedSettingsY: Int = Int.MIN_VALUE
 
+    // Idle auto-dimming state
     private var idleSinceElapsedMs: Long? = null
     private var isAutoDimmed: Boolean = false
     private var autoDimScheduled: Boolean = false
@@ -124,6 +135,17 @@ class FloatingOverlayController(
         }
     }
 
+    // Cinema Auto-Hide toast & 500m split milestone state
+    private var trackedWorkoutId: String? = null
+    private var lastSplitMilestoneMeters: Int = 0
+    private var lastSplitElapsedSec: Int = 0
+    private var lastProgramStepKey: String? = null
+    private var activeToastText: String? = null
+    private val clearToastRunnable = Runnable {
+        activeToastText = null
+        render()
+    }
+
     private var isExpanded = false
     private var lastTelemetry = RowingTelemetry()
     private var lastConnection: ConnectionState = ConnectionState.Disconnected
@@ -131,8 +153,10 @@ class FloatingOverlayController(
     private var lastSettings: OverlaySettings = preferences.settings.value
     private var lastGoal: WorkoutGoal = WorkoutGoal()
     private var lastGhostDelta: GhostDelta? = null
+    private var lastGhostTotalMeters: Int? = null
     private var lastProgram: ProgramProgressState? = null
     private var lastBatteryPercent: Int? = null
+    private var lastSavedWeeklyDistanceMeters: Int = 0
 
     val isShowing: Boolean get() = rootView != null
 
@@ -151,18 +175,18 @@ class FloatingOverlayController(
         val trackBg = createProgressBarDrawable(Color.argb(70, 148, 163, 184))
         val pauseBg = createChipDrawable(COLOR_AMBER)
         val recordBg = createChipDrawable(COLOR_SKY)
-        val compactBg = createChipDrawable(COLOR_SLATE_CHIP)
+        val modeBg = createChipDrawable(COLOR_SKY)
         val lockBg = createChipDrawable(COLOR_SLATE_CHIP)
         val styleBg = createChipDrawable(COLOR_SLATE_CHIP)
 
         val container = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(14), dp(9), dp(14), dp(9))
+            setPadding(dp(12), dp(8), dp(12), dp(8))
             background = pillBg
             elevation = if (settings.overlayStyle == OverlayStyle.STANDARD) dp(8).toFloat() else 0f
         }
 
-        // Top compact row (always visible)
+        // Top compact row (dot + text OR visual bar + micro-caption)
         val topRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -180,14 +204,30 @@ class FloatingOverlayController(
             setTextColor(Color.parseColor("#F8FAFC"))
             typeface = Typeface.MONOSPACE
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f * settings.scale)
-            text = "--:-- /500m  •  0 spm  •  0 m  •  00:00"
+            text = "Bereit zum Rudern"
+        }
+
+        val barView = VisualBarView(context).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(190), dp(16)).apply {
+                marginEnd = dp(8)
+            }
+            visibility = View.GONE
+        }
+
+        val barCaption = TextView(context).apply {
+            setTextColor(Color.parseColor("#E2E8F0"))
+            typeface = Typeface.MONOSPACE
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f * settings.scale)
+            visibility = View.GONE
         }
 
         topRow.addView(dot)
         topRow.addView(miniText)
+        topRow.addView(barView)
+        topRow.addView(barCaption)
         container.addView(topRow)
 
-        // Slim goal/program progress bar
+        // Slim secondary progress bar (used in Smart / Telemetry / Cinema Toast modes)
         val fillView = View(context).apply {
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 0f)
             background = fillBg
@@ -257,25 +297,27 @@ class FloatingOverlayController(
         actionRow.addView(appBtn)
         actionRow.addView(closeBtn)
 
-        // Quick-toggle row for Style, Cinema Compact mode & Position Lock (usable mid-episode)
+        // Quick-toggle row for Mode, Style & Position Lock (usable mid-episode)
         val quickToggleRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(0, dp(6), 0, 0)
+        }
+        val modeBtn = createActionChip("Modus: Smart", modeBg) {
+            val all = OverlayContentMode.entries
+            val next = all[(all.indexOf(lastSettings.overlayContentMode) + 1) % all.size]
+            preferences.setOverlayContentMode(next)
         }
         val styleBtn = createActionChip("Stil: Standard", styleBg) {
             val all = OverlayStyle.entries
             val next = all[(all.indexOf(lastSettings.overlayStyle) + 1) % all.size]
             preferences.setOverlayStyle(next)
         }
-        val compactBtn = createActionChip("Kompakt", compactBg) {
-            preferences.setCompactOverlayMode(!lastSettings.compactOverlayMode)
-        }
         val lockBtn = createActionChip("Pos: Frei", lockBg) {
             preferences.setOverlayPositionLocked(!lastSettings.overlayPositionLocked)
         }
+        quickToggleRow.addView(modeBtn)
         quickToggleRow.addView(styleBtn)
-        quickToggleRow.addView(compactBtn)
         quickToggleRow.addView(lockBtn)
 
         expanded.addView(extraMetrics)
@@ -303,7 +345,7 @@ class FloatingOverlayController(
             y = clampedY
         }
 
-        // Re-clamp automatically when layout size changes (initial layout, tap-to-expand, scale, longer text)
+        // Re-clamp automatically when layout size changes
         container.addOnLayoutChangeListener { view, _, _, _, _, _, _, _, _ ->
             val lp = layoutParams ?: return@addOnLayoutChangeListener
             val (nx, ny) = clampPosition(lp.x, lp.y, view)
@@ -332,7 +374,6 @@ class FloatingOverlayController(
                     initialTouchX = event.rawX
                     initialTouchY = event.rawY
                     moved = false
-                    // Wake immediately on touch
                     mainHandler.removeCallbacks(autoDimRunnable)
                     autoDimScheduled = false
                     idleSinceElapsedMs = null
@@ -382,6 +423,8 @@ class FloatingOverlayController(
             layoutParams = params
             statusDot = dot
             miniLineView = miniText
+            visualBarView = barView
+            barCaptionView = barCaption
             progressTrack = track
             progressFill = fillView
             progressRemainder = remView
@@ -390,7 +433,7 @@ class FloatingOverlayController(
             nextStepButton = nextBtn
             pauseButton = pauseBtn
             recordButton = recBtn
-            compactToggleButton = compactBtn
+            modeToggleButton = modeBtn
             lockToggleButton = lockBtn
             styleToggleButton = styleBtn
             pillDrawable = pillBg
@@ -398,7 +441,7 @@ class FloatingOverlayController(
             progressFillDrawable = fillBg
             pauseBtnDrawable = pauseBg
             recordBtnDrawable = recordBg
-            compactBtnDrawable = compactBg
+            modeBtnDrawable = modeBg
             lockBtnDrawable = lockBg
             styleBtnDrawable = styleBg
             lastAppliedSettingsX = settings.overlayX
@@ -412,7 +455,9 @@ class FloatingOverlayController(
 
     fun hide() {
         mainHandler.removeCallbacks(autoDimRunnable)
+        mainHandler.removeCallbacks(clearToastRunnable)
         autoDimScheduled = false
+        activeToastText = null
         val view = rootView ?: return
         try {
             windowManager.removeView(view)
@@ -422,6 +467,8 @@ class FloatingOverlayController(
         layoutParams = null
         statusDot = null
         miniLineView = null
+        visualBarView = null
+        barCaptionView = null
         progressTrack = null
         progressFill = null
         progressRemainder = null
@@ -430,7 +477,7 @@ class FloatingOverlayController(
         nextStepButton = null
         pauseButton = null
         recordButton = null
-        compactToggleButton = null
+        modeToggleButton = null
         lockToggleButton = null
         styleToggleButton = null
         pillDrawable = null
@@ -438,7 +485,7 @@ class FloatingOverlayController(
         progressFillDrawable = null
         pauseBtnDrawable = null
         recordBtnDrawable = null
-        compactBtnDrawable = null
+        modeBtnDrawable = null
         lockBtnDrawable = null
         styleBtnDrawable = null
         isExpanded = false
@@ -486,8 +533,10 @@ class FloatingOverlayController(
         settings: OverlaySettings = lastSettings,
         goal: WorkoutGoal = lastGoal,
         ghostDelta: GhostDelta? = lastGhostDelta,
+        ghostTotalMeters: Int? = lastGhostTotalMeters,
         program: ProgramProgressState? = lastProgram,
         batteryPercent: Int? = lastBatteryPercent,
+        savedWeeklyDistanceMeters: Int = lastSavedWeeklyDistanceMeters,
     ) {
         lastTelemetry = telemetry
         lastConnection = connection
@@ -495,9 +544,69 @@ class FloatingOverlayController(
         lastSettings = settings
         lastGoal = goal
         lastGhostDelta = ghostDelta
+        lastGhostTotalMeters = ghostTotalMeters
         lastProgram = program
         lastBatteryPercent = batteryPercent
+        lastSavedWeeklyDistanceMeters = savedWeeklyDistanceMeters
+        trackMilestonesAndToasts()
         render()
+    }
+
+    private fun trackMilestonesAndToasts() {
+        val rec = lastRecording as? RecordingState.Active
+        if (rec == null) {
+            trackedWorkoutId = null
+            lastSplitMilestoneMeters = 0
+            lastSplitElapsedSec = 0
+        } else {
+            if (trackedWorkoutId != rec.workoutId) {
+                trackedWorkoutId = rec.workoutId
+                lastSplitMilestoneMeters = (rec.distanceMeters / SPLIT_MILESTONE_METERS) * SPLIT_MILESTONE_METERS
+                lastSplitElapsedSec = rec.elapsedSeconds
+            }
+            val nextMilestone = lastSplitMilestoneMeters + SPLIT_MILESTONE_METERS
+            if (rec.distanceMeters >= nextMilestone) {
+                val achievedMilestone = (rec.distanceMeters / SPLIT_MILESTONE_METERS) * SPLIT_MILESTONE_METERS
+                val splitDuration = (rec.elapsedSeconds - lastSplitElapsedSec).coerceAtLeast(1)
+                val splitsCrossed = ((achievedMilestone - lastSplitMilestoneMeters) / SPLIT_MILESTONE_METERS).coerceAtLeast(1)
+                val per500Sec = (splitDuration.toDouble() / splitsCrossed.toDouble()).roundToInt()
+                val sessionAvg = OverlayContentFormatter.sessionAvgPaceSec(rec.distanceMeters, rec.elapsedSeconds)
+                lastSplitMilestoneMeters = achievedMilestone
+                lastSplitElapsedSec = rec.elapsedSeconds
+                if (lastSettings.overlayContentMode == OverlayContentMode.CINEMA_TOAST) {
+                    triggerToast(
+                        OverlayContentFormatter.formatSplitMilestoneToast(
+                            milestoneMeters = achievedMilestone,
+                            splitDurationSec = per500Sec,
+                            sessionAvgPaceSec = sessionAvg,
+                        ),
+                    )
+                }
+            }
+        }
+
+        val progKey = lastProgram?.let { "${it.plan.preset.id}:${it.stepIndex}:${it.isCompleted}" }
+        if (progKey != null && progKey != lastProgramStepKey && lastProgramStepKey != null) {
+            if (lastSettings.overlayContentMode == OverlayContentMode.CINEMA_TOAST) {
+                val p = lastProgram!!
+                val msg = when {
+                    p.isCompleted -> "✓ ${p.plan.titleWithScale} geschafft!"
+                    p.currentStep is ProgramStep.RowingDistance ->
+                        "R${p.currentStep.roundIndex}/${p.currentStep.totalRounds}: ${RowingTelemetry.formatDistance(p.currentStep.targetMeters)} rudern"
+                    else -> null
+                }
+                if (msg != null) triggerToast(msg)
+            }
+        }
+        lastProgramStepKey = progKey
+    }
+
+    private fun triggerToast(message: String) {
+        activeToastText = message
+        mainHandler.removeCallbacks(clearToastRunnable)
+        mainHandler.postDelayed(clearToastRunnable, CINEMA_TOAST_DURATION_MS)
+        // Wake overlay immediately for the toast
+        rootView?.let { setAutoDimmed(it, false) }
     }
 
     private fun render() {
@@ -522,6 +631,7 @@ class FloatingOverlayController(
         }
 
         val rec = lastRecording
+        val isRecActive = rec is RecordingState.Active
         val elapsedSec = when (rec) {
             is RecordingState.Active -> rec.elapsedSeconds
             RecordingState.Idle -> lastTelemetry.elapsedSeconds
@@ -532,14 +642,22 @@ class FloatingOverlayController(
         }
 
         val style = lastSettings.overlayStyle
+        val contentMode = lastSettings.overlayContentMode
         val program = lastProgram
 
-        // Gentle auto-dimming when flywheel is idle > 15s (never dims during active rest/KB station or expanded view)
+        // Low-battery alert for the WaterRower S4 ComModule (< 20%)
+        val lowBatteryPct = lastBatteryPercent?.takeIf {
+            lastConnection is ConnectionState.Connected && it in 1 until LOW_BATTERY_THRESHOLD_PERCENT
+        }
+        val lowBatColor = if (lowBatteryPct != null && lowBatteryPct <= 10) COLOR_DISCONNECTED else COLOR_AMBER
+
+        // Gentle auto-dimming when flywheel is idle > 15s (never dims during rest/KB, active toast, or expanded)
         val inActiveOffRowerOrRest = program != null && !program.isCompleted &&
             (program.currentStep is ProgramStep.TimedRest || program.currentStep is ProgramStep.OffRowerStation)
         val shouldStayBright = isExpanded ||
             lastTelemetry.strokeRateSpm > 0f ||
-            inActiveOffRowerOrRest
+            inActiveOffRowerOrRest ||
+            activeToastText != null
         val nowElapsed = SystemClock.elapsedRealtime()
         if (shouldStayBright) {
             if (autoDimScheduled) {
@@ -595,6 +713,7 @@ class FloatingOverlayController(
 
         if (lastSettings.scale != appliedScale) {
             miniLineView?.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f * lastSettings.scale)
+            barCaptionView?.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f * lastSettings.scale)
             extraMetricsView?.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f * lastSettings.scale)
             appliedScale = lastSettings.scale
         }
@@ -619,155 +738,231 @@ class FloatingOverlayController(
             appliedDotColor = dotColor
         }
 
-        val spmText = String.format(Locale.US, "%.0f", lastTelemetry.strokeRateSpm)
-        val elapsedToShow = RowingTelemetry.formatDuration(elapsedSec)
+        val isBarMode = contentMode == OverlayContentMode.PROGRESS_BAR
+        if (lastBarModeVisible != isBarMode) {
+            visualBarView?.visibility = if (isBarMode) View.VISIBLE else View.GONE
+            barCaptionView?.visibility = if (isBarMode) View.VISIBLE else View.GONE
+            lastBarModeVisible = isBarMode
+        }
+
         val distToShow = RowingTelemetry.formatDistance(distMeters)
-        val wattsSuffix = if (lastSettings.showWattsInMini && lastTelemetry.watts > 0) {
-            "  •  ${lastTelemetry.watts} W"
-        } else {
-            ""
-        }
+        val elapsedToShow = RowingTelemetry.formatDuration(elapsedSec)
 
-        val baseMini = if (lastSettings.compactOverlayMode) {
-            when {
-                program != null && program.isCompleted ->
-                    "✓ ${program.plan.preset.title}  •  $distToShow"
-                program != null && program.currentStep is ProgramStep.TimedRest ->
-                    "Pause ${RowingTelemetry.formatDuration(program.restRemainingSeconds)}"
-                program != null && program.currentStep is ProgramStep.OffRowerStation -> {
-                    val step = program.currentStep
-                    "R${step.roundIndex}/${step.totalRounds}: ${step.exerciseLabel}"
-                }
-                program != null && program.currentStep is ProgramStep.RowingDistance -> {
-                    val step = program.currentStep
-                    val remM = (step.targetMeters - program.stepDistanceMeters).coerceAtLeast(0)
-                    "${lastTelemetry.formattedPace}  •  noch ${RowingTelemetry.formatDistance(remM)}"
-                }
-                else -> {
-                    val rem = lastGoal.remainingSummary(distMeters, elapsedSec)
-                    if (rem != null) {
-                        "${lastTelemetry.formattedPace}  •  $rem"
-                    } else {
-                        "${lastTelemetry.formattedPace}  •  $distToShow"
-                    }
-                }
+        if (isBarMode) {
+            // Visual Progress / Ghost Race Bar Mode
+            if (lastMiniVisible != false) {
+                miniLineView?.visibility = View.GONE
+                lastMiniVisible = false
             }
-        } else {
-            when {
-                program != null && program.isCompleted ->
-                    "✓ ${program.plan.titleWithScale}  •  $distToShow  •  $elapsedToShow"
-                program != null && program.currentStep is ProgramStep.TimedRest -> {
-                    val step = program.currentStep
-                    "Pause ${RowingTelemetry.formatDuration(program.restRemainingSeconds)}  •  danach ${step.nextDescription}"
-                }
-                program != null && program.currentStep is ProgramStep.OffRowerStation -> {
-                    val step = program.currentStep
-                    val nextHint = step.nextRoundLabel?.let { "Ziehen für $it" } ?: "Fertig → Stop & Save"
-                    "R${step.roundIndex}/${step.totalRounds}: ${step.exerciseLabel}  •  $nextHint"
-                }
-                program != null && program.currentStep is ProgramStep.RowingDistance -> {
-                    val step = program.currentStep
-                    val remM = (step.targetMeters - program.stepDistanceMeters).coerceAtLeast(0)
-                    "R${step.roundIndex}/${step.totalRounds}  •  ${lastTelemetry.formattedPace} /500m  •  $spmText spm  •  noch ${RowingTelemetry.formatDistance(remM)}  •  $elapsedToShow$wattsSuffix"
-                }
-                else ->
-                    "${lastTelemetry.formattedPace} /500m  •  $spmText spm  •  $distToShow  •  $elapsedToShow$wattsSuffix"
-            }
-        }
+            setDotMarginEnd(dp(9))
 
-        val showGhostInMini = lastGhostDelta != null &&
-            (program == null || program.isCompleted || program.currentStep is ProgramStep.RowingDistance)
-        val ghost = if (showGhostInMini) lastGhostDelta else null
-        val ghostSuffix = ghost?.let { "  •  ${it.formattedCompact}" } ?: ""
-        val rawGhostColor = when {
-            ghost == null -> 0
-            ghost.deltaMeters > 0 -> COLOR_ACTIVE_GREEN
-            ghost.deltaMeters < 0 -> COLOR_AMBER
-            else -> COLOR_CONNECTED_SKY
-        }
-        val ghostColor = if (ghost == null || style == OverlayStyle.STANDARD) {
-            rawGhostColor
-        } else {
-            Color.argb(200, Color.red(rawGhostColor), Color.green(rawGhostColor), Color.blue(rawGhostColor))
-        }
+            val barModel = OverlayContentFormatter.computeBarModel(
+                currentPaceSec = lastTelemetry.paceSecondsPer500m,
+                distMeters = distMeters,
+                elapsedSec = elapsedSec,
+                goal = lastGoal,
+                program = program,
+                ghostDelta = lastGhostDelta,
+                ghostTotalMeters = lastGhostTotalMeters,
+                weeklyGoalMeters = lastSettings.weeklyGoalMeters,
+                savedWeeklyDistanceMeters = lastSavedWeeklyDistanceMeters,
+                isRecordingActive = isRecActive,
+            )
 
-        // Low-battery alert for the WaterRower S4 ComModule (< 20%)
-        val lowBatteryPct = lastBatteryPercent?.takeIf {
-            lastConnection is ConnectionState.Connected && it in 1 until LOW_BATTERY_THRESHOLD_PERCENT
-        }
-        val lowBatColor = if (lowBatteryPct != null && lowBatteryPct <= 10) COLOR_DISCONNECTED else COLOR_AMBER
-        val lowBatKey = lowBatteryPct?.toString() ?: ""
-
-        val miniKey = "$baseMini|$ghostSuffix|$ghostColor|$lowBatKey"
-        if (miniKey != lastMiniKey) {
-            if (ghost == null && lowBatteryPct == null) {
-                miniLineView?.text = baseMini
-            } else {
-                val spannable = SpannableStringBuilder(baseMini)
-                if (ghost != null) {
-                    spannable.append("  •  ")
-                    val start = spannable.length
-                    spannable.append(ghost.formattedCompact)
-                    spannable.setSpan(
-                        ForegroundColorSpan(ghostColor),
-                        start,
-                        spannable.length,
-                        Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
-                    )
-                }
-                if (lowBatteryPct != null) {
-                    spannable.append("  •  ")
-                    val start = spannable.length
-                    spannable.append("🔋 $lowBatteryPct%")
-                    spannable.setSpan(
-                        ForegroundColorSpan(lowBatColor),
-                        start,
-                        spannable.length,
-                        Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
-                    )
-                }
-                miniLineView?.text = spannable
-            }
-            lastMiniKey = miniKey
-        }
-
-        // Update slim progress bar (program step progress takes precedence over free goal)
-        val progress = when {
-            program != null -> program.stepProgressFraction
-            else -> lastGoal.progressFraction(distMeters, elapsedSec)
-        }
-        val showProgress = progress != null
-        if (appliedProgressVisible != showProgress) {
-            progressTrack?.visibility = if (showProgress) View.VISIBLE else View.GONE
-            appliedProgressVisible = showProgress
-        }
-        if (progress != null) {
-            val permille = (progress * 1000f).roundToInt().coerceIn(0, 1000)
-            if (permille != appliedProgressPermille) {
-                val fillLp = progressFill?.layoutParams as? LinearLayout.LayoutParams
-                val remLp = progressRemainder?.layoutParams as? LinearLayout.LayoutParams
-                if (fillLp != null && remLp != null) {
-                    fillLp.weight = permille / 1000f
-                    remLp.weight = (1000 - permille) / 1000f
-                    progressFill?.layoutParams = fillLp
-                    progressRemainder?.layoutParams = remLp
-                }
-                appliedProgressPermille = permille
-            }
-            val rawBarColor = when {
-                permille >= 1000 -> COLOR_ACTIVE_GREEN
+            val fillColor = when {
+                barModel.isCompleted -> COLOR_ACTIVE_GREEN
                 program?.currentStep is ProgramStep.OffRowerStation -> COLOR_VIOLET
                 program?.currentStep is ProgramStep.TimedRest -> COLOR_AMBER
+                barModel.isGhostRace && (lastGhostDelta?.deltaMeters ?: 0) > 0 -> COLOR_ACTIVE_GREEN
+                barModel.isGhostRace && (lastGhostDelta?.deltaMeters ?: 0) < 0 -> COLOR_AMBER
                 else -> COLOR_CONNECTED_SKY
             }
-            val barColor = if (style == OverlayStyle.STANDARD) {
-                rawBarColor
+            val effectiveAlpha = if (style == OverlayStyle.STANDARD) 255 else 195
+            visualBarView?.updateBar(
+                userFraction = barModel.userFraction,
+                ghostFraction = barModel.ghostFraction,
+                fillColor = Color.argb(effectiveAlpha, Color.red(fillColor), Color.green(fillColor), Color.blue(fillColor)),
+                ghostMarkerColor = Color.argb(effectiveAlpha, Color.red(COLOR_AMBER), Color.green(COLOR_AMBER), Color.blue(COLOR_AMBER)),
+            )
+
+            val caption = if (lowBatteryPct != null) {
+                "${barModel.caption}  •  🔋 $lowBatteryPct%"
             } else {
-                Color.argb(170, Color.red(rawBarColor), Color.green(rawBarColor), Color.blue(rawBarColor))
+                barModel.caption
             }
-            if (barColor != appliedProgressColor) {
-                progressFillDrawable?.setColor(barColor)
-                appliedProgressColor = barColor
+            val captionColor = when {
+                lowBatteryPct != null -> lowBatColor
+                barModel.isCompleted -> COLOR_ACTIVE_GREEN
+                barModel.isGhostRace && (lastGhostDelta?.deltaMeters ?: 0) > 0 -> COLOR_ACTIVE_GREEN
+                barModel.isGhostRace && (lastGhostDelta?.deltaMeters ?: 0) < 0 -> COLOR_AMBER
+                style == OverlayStyle.CINEMA -> Color.parseColor("#CBD5E1")
+                else -> Color.parseColor("#F8FAFC")
+            }
+            if (caption != lastBarCaption) {
+                barCaptionView?.text = caption
+                lastBarCaption = caption
+            }
+            if (captionColor != lastBarCaptionColor) {
+                barCaptionView?.setTextColor(captionColor)
+                lastBarCaptionColor = captionColor
+            }
+            if (appliedProgressVisible != false) {
+                progressTrack?.visibility = View.GONE
+                appliedProgressVisible = false
+            }
+        } else {
+            // Text-based modes: SMART, CINEMA_TOAST, or TELEMETRY
+            val cinemaText: String? = if (contentMode == OverlayContentMode.CINEMA_TOAST) {
+                when {
+                    inActiveOffRowerOrRest -> when (val step = program!!.currentStep) {
+                        is ProgramStep.TimedRest ->
+                            "Pause ${RowingTelemetry.formatDuration(program.restRemainingSeconds)}  •  danach ${step.nextDescription}"
+                        is ProgramStep.OffRowerStation -> {
+                            val nextHint = step.nextRoundLabel?.let { "Ziehen für $it" } ?: "Fertig → Stop & Save"
+                            "R${step.roundIndex}/${step.totalRounds}: ${step.exerciseLabel}  •  $nextHint"
+                        }
+                        else -> null
+                    }
+                    activeToastText != null -> activeToastText
+                    lowBatteryPct != null -> "🔋 ComModule $lowBatteryPct%"
+                    lastConnection is ConnectionState.Error -> "BLE getrennt"
+                    isExpanded -> OverlayContentFormatter.formatSmartLine(
+                        currentPaceSec = lastTelemetry.paceSecondsPer500m,
+                        distMeters = distMeters,
+                        elapsedSec = elapsedSec,
+                        goal = lastGoal,
+                        program = program,
+                        weeklyGoalMeters = lastSettings.weeklyGoalMeters,
+                        savedWeeklyDistanceMeters = lastSavedWeeklyDistanceMeters,
+                        isRecordingActive = isRecActive,
+                    )
+                    else -> null // Collapsed ultra-minimal dot!
+                }
+            } else {
+                null
+            }
+
+            val showMiniText = contentMode != OverlayContentMode.CINEMA_TOAST || cinemaText != null
+            if (lastMiniVisible != showMiniText) {
+                miniLineView?.visibility = if (showMiniText) View.VISIBLE else View.GONE
+                lastMiniVisible = showMiniText
+            }
+            setDotMarginEnd(if (showMiniText) dp(9) else 0)
+
+            if (showMiniText) {
+                val baseMini = when (contentMode) {
+                    OverlayContentMode.CINEMA_TOAST -> cinemaText.orEmpty()
+                    OverlayContentMode.SMART -> OverlayContentFormatter.formatSmartLine(
+                        currentPaceSec = lastTelemetry.paceSecondsPer500m,
+                        distMeters = distMeters,
+                        elapsedSec = elapsedSec,
+                        goal = lastGoal,
+                        program = program,
+                        weeklyGoalMeters = lastSettings.weeklyGoalMeters,
+                        savedWeeklyDistanceMeters = lastSavedWeeklyDistanceMeters,
+                        isRecordingActive = isRecActive,
+                    )
+                    OverlayContentMode.TELEMETRY -> formatTelemetryMiniLine(
+                        program = program,
+                        distToShow = distToShow,
+                        elapsedToShow = elapsedToShow,
+                    )
+                    OverlayContentMode.PROGRESS_BAR -> ""
+                }
+
+                val showGhostInMini = lastGhostDelta != null &&
+                    contentMode != OverlayContentMode.CINEMA_TOAST &&
+                    (program == null || program.isCompleted || program.currentStep is ProgramStep.RowingDistance)
+                val ghost = if (showGhostInMini) lastGhostDelta else null
+                val ghostSuffix = ghost?.let { "  •  ${it.formattedCompact}" } ?: ""
+                val rawGhostColor = when {
+                    ghost == null -> 0
+                    ghost.deltaMeters > 0 -> COLOR_ACTIVE_GREEN
+                    ghost.deltaMeters < 0 -> COLOR_AMBER
+                    else -> COLOR_CONNECTED_SKY
+                }
+                val ghostColor = if (ghost == null || style == OverlayStyle.STANDARD) {
+                    rawGhostColor
+                } else {
+                    Color.argb(200, Color.red(rawGhostColor), Color.green(rawGhostColor), Color.blue(rawGhostColor))
+                }
+
+                val showLowBatSuffix = lowBatteryPct != null && contentMode != OverlayContentMode.CINEMA_TOAST
+                val lowBatKey = if (showLowBatSuffix) lowBatteryPct.toString() else ""
+                val miniKey = "$baseMini|$ghostSuffix|$ghostColor|$lowBatKey"
+
+                if (miniKey != lastMiniKey) {
+                    if (ghost == null && !showLowBatSuffix) {
+                        miniLineView?.text = baseMini
+                    } else {
+                        val spannable = SpannableStringBuilder(baseMini)
+                        if (ghost != null) {
+                            spannable.append("  •  ")
+                            val start = spannable.length
+                            spannable.append(ghost.formattedCompact)
+                            spannable.setSpan(
+                                ForegroundColorSpan(ghostColor),
+                                start,
+                                spannable.length,
+                                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+                            )
+                        }
+                        if (showLowBatSuffix && lowBatteryPct != null) {
+                            spannable.append("  •  ")
+                            val start = spannable.length
+                            spannable.append("🔋 $lowBatteryPct%")
+                            spannable.setSpan(
+                                ForegroundColorSpan(lowBatColor),
+                                start,
+                                spannable.length,
+                                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+                            )
+                        }
+                        miniLineView?.text = spannable
+                    }
+                    lastMiniKey = miniKey
+                }
+            }
+
+            // Slim secondary progress bar (hidden when Cinema Auto-Hide is collapsed to a pure dot)
+            val progress = when {
+                !showMiniText -> null
+                program != null -> program.stepProgressFraction
+                else -> lastGoal.progressFraction(distMeters, elapsedSec)
+            }
+            val showProgress = progress != null
+            if (appliedProgressVisible != showProgress) {
+                progressTrack?.visibility = if (showProgress) View.VISIBLE else View.GONE
+                appliedProgressVisible = showProgress
+            }
+            if (progress != null) {
+                val permille = (progress * 1000f).roundToInt().coerceIn(0, 1000)
+                if (permille != appliedProgressPermille) {
+                    val fillLp = progressFill?.layoutParams as? LinearLayout.LayoutParams
+                    val remLp = progressRemainder?.layoutParams as? LinearLayout.LayoutParams
+                    if (fillLp != null && remLp != null) {
+                        fillLp.weight = permille / 1000f
+                        remLp.weight = (1000 - permille) / 1000f
+                        progressFill?.layoutParams = fillLp
+                        progressRemainder?.layoutParams = remLp
+                    }
+                    appliedProgressPermille = permille
+                }
+                val rawBarColor = when {
+                    permille >= 1000 -> COLOR_ACTIVE_GREEN
+                    program?.currentStep is ProgramStep.OffRowerStation -> COLOR_VIOLET
+                    program?.currentStep is ProgramStep.TimedRest -> COLOR_AMBER
+                    else -> COLOR_CONNECTED_SKY
+                }
+                val barColor = if (style == OverlayStyle.STANDARD) {
+                    rawBarColor
+                } else {
+                    Color.argb(170, Color.red(rawBarColor), Color.green(rawBarColor), Color.blue(rawBarColor))
+                }
+                if (barColor != appliedProgressColor) {
+                    progressFillDrawable?.setColor(barColor)
+                    appliedProgressColor = barColor
+                }
             }
         }
 
@@ -777,19 +972,24 @@ class FloatingOverlayController(
             lastNextStepVisible = showNextStepBtn
         }
 
+        if (lastModeButtonMode != contentMode) {
+            modeToggleButton?.text = "Modus: ${contentMode.shortLabel}"
+            modeBtnDrawable?.setColor(
+                when (contentMode) {
+                    OverlayContentMode.SMART -> COLOR_SKY
+                    OverlayContentMode.CINEMA_TOAST -> COLOR_VIOLET
+                    OverlayContentMode.PROGRESS_BAR -> COLOR_ACTIVE_GREEN
+                    OverlayContentMode.TELEMETRY -> COLOR_SLATE_CHIP
+                },
+            )
+            lastModeButtonMode = contentMode
+        }
         if (lastStyleButtonStyle != style) {
             styleToggleButton?.text = "Stil: ${style.label}"
             styleBtnDrawable?.setColor(
                 if (style == OverlayStyle.STANDARD) COLOR_SLATE_CHIP else COLOR_VIOLET,
             )
             lastStyleButtonStyle = style
-        }
-        if (lastCompactMode != lastSettings.compactOverlayMode) {
-            compactToggleButton?.text = if (lastSettings.compactOverlayMode) "Voll" else "Kompakt"
-            compactBtnDrawable?.setColor(
-                if (lastSettings.compactOverlayMode) COLOR_SKY else COLOR_SLATE_CHIP,
-            )
-            lastCompactMode = lastSettings.compactOverlayMode
         }
         if (lastLockedMode != lastSettings.overlayPositionLocked) {
             lockToggleButton?.text = if (lastSettings.overlayPositionLocked) "Gesperrt" else "Pos: Frei"
@@ -800,21 +1000,13 @@ class FloatingOverlayController(
         }
 
         if (isExpanded) {
+            val spmText = String.format(Locale.US, "%.0f", lastTelemetry.strokeRateSpm)
             val caloriesToShow = when (rec) {
                 is RecordingState.Active -> rec.calories
                 RecordingState.Idle -> lastTelemetry.calories
             }
-            val strokesToShow = when (rec) {
-                is RecordingState.Active -> rec.strokeCount
-                RecordingState.Idle -> lastTelemetry.strokeCount
-            }
             val hrPart = lastTelemetry.heartRateBpm?.let { "  •  $it bpm" } ?: ""
-            val remPart = if (program != null) {
-                "  •  ${program.plan.titleWithScale} ($distToShow)"
-            } else {
-                lastGoal.remainingSummary(distMeters, elapsedSec)?.let { "  •  $it" } ?: ""
-            }
-            val extraText = "${lastTelemetry.watts} W  •  $caloriesToShow kcal  •  $strokesToShow Züge$hrPart$remPart"
+            val extraText = "${lastTelemetry.formattedPace} /500m  •  $spmText spm  •  $distToShow  •  $elapsedToShow  •  ${lastTelemetry.watts} W  •  $caloriesToShow kcal$hrPart"
             if (extraText != lastExtraText) {
                 extraMetricsView?.text = extraText
                 lastExtraText = extraText
@@ -868,6 +1060,47 @@ class FloatingOverlayController(
         }
     }
 
+    private fun formatTelemetryMiniLine(
+        program: ProgramProgressState?,
+        distToShow: String,
+        elapsedToShow: String,
+    ): String {
+        val spmText = String.format(Locale.US, "%.0f", lastTelemetry.strokeRateSpm)
+        val wattsSuffix = if (lastSettings.showWattsInMini && lastTelemetry.watts > 0) {
+            "  •  ${lastTelemetry.watts} W"
+        } else {
+            ""
+        }
+        return when {
+            program != null && program.isCompleted ->
+                "✓ ${program.plan.titleWithScale}  •  $distToShow  •  $elapsedToShow"
+            program != null && program.currentStep is ProgramStep.TimedRest -> {
+                val step = program.currentStep
+                "Pause ${RowingTelemetry.formatDuration(program.restRemainingSeconds)}  •  danach ${step.nextDescription}"
+            }
+            program != null && program.currentStep is ProgramStep.OffRowerStation -> {
+                val step = program.currentStep
+                val nextHint = step.nextRoundLabel?.let { "Ziehen für $it" } ?: "Fertig → Stop & Save"
+                "R${step.roundIndex}/${step.totalRounds}: ${step.exerciseLabel}  •  $nextHint"
+            }
+            program != null && program.currentStep is ProgramStep.RowingDistance -> {
+                val step = program.currentStep
+                val remM = (step.targetMeters - program.stepDistanceMeters).coerceAtLeast(0)
+                "R${step.roundIndex}/${step.totalRounds}  •  ${lastTelemetry.formattedPace} /500m  •  $spmText spm  •  noch ${RowingTelemetry.formatDistance(remM)}  •  $elapsedToShow$wattsSuffix"
+            }
+            else ->
+                "${lastTelemetry.formattedPace} /500m  •  $spmText spm  •  $distToShow  •  $elapsedToShow$wattsSuffix"
+        }
+    }
+
+    private fun setDotMarginEnd(marginPx: Int) {
+        if (appliedDotMarginEnd == marginPx) return
+        val lp = statusDot?.layoutParams as? LinearLayout.LayoutParams ?: return
+        lp.marginEnd = marginPx
+        statusDot?.layoutParams = lp
+        appliedDotMarginEnd = marginPx
+    }
+
     private fun setAutoDimmed(view: View, dimmed: Boolean) {
         if (isAutoDimmed == dimmed) return
         isAutoDimmed = dimmed
@@ -880,20 +1113,24 @@ class FloatingOverlayController(
 
     private fun applyTextStyle(style: OverlayStyle, opacity: Float) {
         val textView = miniLineView ?: return
+        val captionView = barCaptionView
         when (style) {
             OverlayStyle.STANDARD -> {
                 textView.setTextColor(Color.parseColor("#F8FAFC"))
                 textView.setShadowLayer(0f, 0f, 0f, Color.TRANSPARENT)
+                captionView?.setShadowLayer(0f, 0f, 0f, Color.TRANSPARENT)
             }
             OverlayStyle.CINEMA -> {
                 val textAlpha = (opacity.coerceIn(0.45f, 1.0f) * 215f).roundToInt().coerceIn(115, 220)
                 textView.setTextColor(Color.argb(textAlpha, 203, 213, 225))
                 textView.setShadowLayer(2f, 0f, 1f, Color.argb(140, 0, 0, 0))
+                captionView?.setShadowLayer(2f, 0f, 1f, Color.argb(140, 0, 0, 0))
             }
             OverlayStyle.TRANSPARENT -> {
                 val textAlpha = (opacity.coerceIn(0.4f, 1.0f) * 235f).roundToInt().coerceIn(120, 238)
                 textView.setTextColor(Color.argb(textAlpha, 226, 232, 240))
                 textView.setShadowLayer(5f, 0f, 1.5f, Color.argb(225, 0, 0, 0))
+                captionView?.setShadowLayer(5f, 0f, 1.5f, Color.argb(225, 0, 0, 0))
             }
         }
     }
@@ -952,10 +1189,15 @@ class FloatingOverlayController(
         appliedExpandedForBg = null
         appliedScale = Float.NaN
         appliedDotColor = 0
+        appliedDotMarginEnd = -1
         appliedProgressVisible = null
         appliedProgressPermille = -1
         appliedProgressColor = 0
+        lastMiniVisible = null
         lastMiniKey = null
+        lastBarModeVisible = null
+        lastBarCaption = null
+        lastBarCaptionColor = 0
         lastExtraText = null
         lastNextStepVisible = null
         lastPauseVisible = null
@@ -963,7 +1205,7 @@ class FloatingOverlayController(
         lastPauseColor = 0
         lastRecordText = null
         lastRecordColor = 0
-        lastCompactMode = null
+        lastModeButtonMode = null
         lastLockedMode = null
         lastStyleButtonStyle = null
         lastAppliedSettingsX = Int.MIN_VALUE
@@ -1078,10 +1320,85 @@ class FloatingOverlayController(
             context.resources.displayMetrics,
         ).roundToInt()
 
+    /**
+     * Lightweight native Canvas bar rendering either a sleek filling progress bar
+     * or a 2-marker live Ghost Race track (user dot vs. ghost marker).
+     */
+    private class VisualBarView(context: Context) : View(context) {
+        private val trackPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(85, 148, 163, 184)
+        }
+        private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = COLOR_CONNECTED_SKY
+        }
+        private val ghostPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = COLOR_AMBER
+        }
+        private val userDotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+        }
+        private val trackRect = RectF()
+        private val fillRect = RectF()
+
+        private var userFrac: Float = 0f
+        private var ghostFrac: Float? = null
+
+        fun updateBar(
+            userFraction: Float,
+            ghostFraction: Float?,
+            fillColor: Int,
+            ghostMarkerColor: Int,
+        ) {
+            val u = userFraction.coerceIn(0f, 1f)
+            val g = ghostFraction?.coerceIn(0f, 1f)
+            if (u == userFrac && g == ghostFrac && fillPaint.color == fillColor && ghostPaint.color == ghostMarkerColor) {
+                return
+            }
+            userFrac = u
+            ghostFrac = g
+            fillPaint.color = fillColor
+            ghostPaint.color = ghostMarkerColor
+            invalidate()
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            val w = width.toFloat()
+            val h = height.toFloat()
+            if (w <= 0f || h <= 0f) return
+
+            val padX = h * 0.35f
+            val usableW = (w - padX * 2f).coerceAtLeast(1f)
+            val barH = (h * 0.42f).coerceAtLeast(4f)
+            val top = (h - barH) / 2f
+            val radius = barH / 2f
+
+            trackRect.set(padX, top, padX + usableW, top + barH)
+            canvas.drawRoundRect(trackRect, radius, radius, trackPaint)
+
+            val fillRight = padX + usableW * userFrac
+            if (userFrac > 0.005f) {
+                fillRect.set(padX, top, fillRight.coerceAtLeast(padX + barH), top + barH)
+                canvas.drawRoundRect(fillRect, radius, radius, fillPaint)
+            }
+
+            // Ghost marker & user head dot in Ghost Race mode
+            ghostFrac?.let { gf ->
+                val gx = padX + usableW * gf
+                val cy = h / 2f
+                canvas.drawCircle(gx, cy, h * 0.30f, ghostPaint)
+                canvas.drawCircle(fillRight, cy, h * 0.34f, fillPaint)
+                canvas.drawCircle(fillRight, cy, h * 0.16f, userDotPaint)
+            }
+        }
+    }
+
     companion object {
         private const val IDLE_AUTO_DIM_MS = 15_000L
         private const val IDLE_DIM_ALPHA = 0.45f
         private const val LOW_BATTERY_THRESHOLD_PERCENT = 20
+        private const val SPLIT_MILESTONE_METERS = 500
+        private const val CINEMA_TOAST_DURATION_MS = 6_000L
 
         private val COLOR_ACTIVE_GREEN = Color.parseColor("#22C55E")
         private val COLOR_SAVE_GREEN = Color.parseColor("#16A34A")

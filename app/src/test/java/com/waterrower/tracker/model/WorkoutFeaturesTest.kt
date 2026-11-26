@@ -286,12 +286,95 @@ class WorkoutFeaturesTest {
 
         val defaults = com.waterrower.tracker.data.OverlaySettings()
         assertEquals(com.waterrower.tracker.data.OverlayStyle.STANDARD, defaults.overlayStyle)
-        assertFalse(defaults.compactOverlayMode)
+        assertEquals(com.waterrower.tracker.data.OverlayContentMode.SMART, defaults.overlayContentMode)
+        assertEquals(
+            com.waterrower.tracker.data.OverlayContentMode.PROGRESS_BAR,
+            com.waterrower.tracker.data.OverlayContentMode.fromId("progress_bar"),
+        )
+        assertEquals(
+            com.waterrower.tracker.data.OverlayContentMode.CINEMA_TOAST,
+            com.waterrower.tracker.data.OverlayContentMode.fromId("cinema_toast"),
+        )
         assertFalse(defaults.overlayPositionLocked)
         assertTrue(defaults.autoReconnectOnStart)
         assertTrue(defaults.autoShowOverlayOnConnect)
         assertFalse(defaults.healthConnectSyncEnabled)
         assertEquals(0, defaults.weeklyGoalMeters)
+    }
+
+    @Test
+    fun overlayContentFormatter_computesSmartEtaProjectionsGhostBarAndSplitToast() {
+        // Distance goal: 5000m, currently at 2500m @ 2:00/500m (120s) -> 2500m left -> ETA 10:00 (600s)
+        val distGoal = WorkoutGoal(distanceTargetMeters = 5_000, targetPaceSecPer500m = 124)
+        val smartDist = com.waterrower.tracker.overlay.OverlayContentFormatter.formatSmartLine(
+            currentPaceSec = 120,
+            distMeters = 2_500,
+            elapsedSec = 600,
+            goal = distGoal,
+            program = null,
+            weeklyGoalMeters = 15_000,
+            savedWeeklyDistanceMeters = 5_000,
+            isRecordingActive = true,
+        )
+        assertTrue(smartDist.contains("ETA 10:00"))
+        assertTrue(smartDist.contains("▲ 4s"))
+
+        // Duration goal: 30 min (1800s), at 10 min (600s) & 2500m @ 120s/500m -> remaining 1200s adds 5000m -> ~7.500m
+        val durGoal = WorkoutGoal(durationTargetSeconds = 1_800)
+        val smartDur = com.waterrower.tracker.overlay.OverlayContentFormatter.formatSmartLine(
+            currentPaceSec = 120,
+            distMeters = 2_500,
+            elapsedSec = 600,
+            goal = durGoal,
+            program = null,
+            weeklyGoalMeters = 0,
+            savedWeeklyDistanceMeters = 0,
+            isRecordingActive = true,
+        )
+        assertTrue(smartDur.contains("noch 20:00"))
+        assertTrue(smartDur.contains("≈"))
+
+        // Free rowing with weekly goal -> shows session avg + live weekly %
+        val smartFree = com.waterrower.tracker.overlay.OverlayContentFormatter.formatSmartLine(
+            currentPaceSec = 120,
+            distMeters = 2_500,
+            elapsedSec = 625,
+            goal = WorkoutGoal(),
+            program = null,
+            weeklyGoalMeters = 10_000,
+            savedWeeklyDistanceMeters = 5_000,
+            isRecordingActive = true,
+        )
+        assertTrue(smartFree.contains("Ø 2:05"))
+        assertTrue(smartFree.contains("Woche 75%"))
+
+        // Ghost Race Visual Bar model
+        val ghostBar = com.waterrower.tracker.overlay.OverlayContentFormatter.computeBarModel(
+            currentPaceSec = 120,
+            distMeters = 1_050,
+            elapsedSec = 250,
+            goal = WorkoutGoal(),
+            program = null,
+            ghostDelta = GhostDelta(deltaMeters = 50, ghostDistanceMeters = 1_000, ghostFinished = false),
+            ghostTotalMeters = 2_000,
+            weeklyGoalMeters = 0,
+            savedWeeklyDistanceMeters = 0,
+            isRecordingActive = true,
+        )
+        assertTrue(ghostBar.isGhostRace)
+        assertEquals(0.525f, ghostBar.userFraction, 0.001f)
+        assertEquals(0.50f, ghostBar.ghostFraction!!, 0.001f)
+        assertEquals("+50 m", ghostBar.caption)
+
+        // 500m Split Toast
+        val toast = com.waterrower.tracker.overlay.OverlayContentFormatter.formatSplitMilestoneToast(
+            milestoneMeters = 1_500,
+            splitDurationSec = 122,
+            sessionAvgPaceSec = 125,
+        )
+        assertTrue(toast.contains("1.500 m") || toast.contains("1,50"))
+        assertTrue(toast.contains("Split 2:02"))
+        assertTrue(toast.contains("-3s vs Ø"))
     }
 
     @Test

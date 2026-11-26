@@ -73,6 +73,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.waterrower.tracker.data.AppPreferences
+import com.waterrower.tracker.data.OverlayContentMode
 import com.waterrower.tracker.data.OverlaySettings
 import com.waterrower.tracker.data.OverlayStyle
 import com.waterrower.tracker.health.HealthConnectAvailability
@@ -106,7 +107,7 @@ fun SettingsScreen(
     onOpacityChange: (Float) -> Unit,
     onScaleChange: (Float) -> Unit,
     onOverlayStyleChange: (OverlayStyle) -> Unit,
-    onCompactOverlayChange: (Boolean) -> Unit,
+    onOverlayContentModeChange: (OverlayContentMode) -> Unit,
     onOverlayLockChange: (Boolean) -> Unit,
     onShowWattsInMiniChange: (Boolean) -> Unit,
     onAutoStartChange: (Boolean) -> Unit,
@@ -151,7 +152,7 @@ fun SettingsScreen(
                 fontWeight = FontWeight.Bold,
             )
 
-            // 1. Floating Overlay Appearance, Cinema Mode & Automation
+            // 1. Floating Overlay Appearance, Smart Modes & Automation
             Card(
                 colors = CardDefaults.cardColors(containerColor = colorScheme.surfaceContainerLow),
                 shape = MaterialTheme.shapes.medium,
@@ -199,7 +200,7 @@ fun SettingsScreen(
                             .padding(16.dp),
                     ) {
                         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                            // Live Preview Pill reflecting Standard / Cinema / Transparent + Compact
+                            // Live Preview Pill reflecting Style + Content Mode
                             val previewBg = when (settings.overlayStyle) {
                                 OverlayStyle.TRANSPARENT -> Color.Transparent
                                 OverlayStyle.CINEMA -> Color(0xFF05070A).copy(alpha = (settings.opacity * 0.72f).coerceIn(0.11f, 0.78f))
@@ -252,22 +253,73 @@ fun SettingsScreen(
                                             .clip(CircleShape)
                                             .background(previewDotColor),
                                     )
-                                    val previewText = if (settings.compactOverlayMode) {
-                                        "2:04  •  1.420 m"
-                                    } else {
-                                        val wattsPart = if (settings.showWattsInMini) "  •  185 W" else ""
-                                        "2:04 /500m  •  26 spm  •  1.420 m  •  06:12$wattsPart"
+                                    when (settings.overlayContentMode) {
+                                        OverlayContentMode.PROGRESS_BAR -> {
+                                            Box(
+                                                modifier = Modifier
+                                                    .width(150.dp)
+                                                    .height(7.dp)
+                                                    .clip(RoundedCornerShape(999.dp))
+                                                    .background(Color(0xFF94A3B8).copy(alpha = 0.35f)),
+                                            ) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth(0.68f)
+                                                        .height(7.dp)
+                                                        .clip(RoundedCornerShape(999.dp))
+                                                        .background(rowingColors.active),
+                                                )
+                                            }
+                                            Text(
+                                                text = "+24 m",
+                                                style = TextStyle(
+                                                    color = rowingColors.active,
+                                                    fontFamily = FontFamily.Monospace,
+                                                    fontSize = (13f * settings.scale).sp,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    shadow = previewShadow,
+                                                ),
+                                                maxLines = 1,
+                                            )
+                                        }
+                                        OverlayContentMode.CINEMA_TOAST -> {
+                                            Text(
+                                                text = "✓ 1.500 m  •  Split 2:03 (-2s vs Ø)",
+                                                style = TextStyle(
+                                                    color = previewTextColor,
+                                                    fontFamily = FontFamily.Monospace,
+                                                    fontSize = (14f * settings.scale).sp,
+                                                    shadow = previewShadow,
+                                                ),
+                                                maxLines = 1,
+                                            )
+                                        }
+                                        OverlayContentMode.SMART -> {
+                                            Text(
+                                                text = "noch 1.420 m  •  ETA 06:05  •  ▲ 3s",
+                                                style = TextStyle(
+                                                    color = previewTextColor,
+                                                    fontFamily = FontFamily.Monospace,
+                                                    fontSize = (15f * settings.scale).sp,
+                                                    shadow = previewShadow,
+                                                ),
+                                                maxLines = 1,
+                                            )
+                                        }
+                                        OverlayContentMode.TELEMETRY -> {
+                                            val wattsPart = if (settings.showWattsInMini) "  •  185 W" else ""
+                                            Text(
+                                                text = "2:04 /500m  •  26 spm  •  1.420 m  •  06:12$wattsPart",
+                                                style = TextStyle(
+                                                    color = previewTextColor,
+                                                    fontFamily = FontFamily.Monospace,
+                                                    fontSize = (15f * settings.scale).sp,
+                                                    shadow = previewShadow,
+                                                ),
+                                                maxLines = 1,
+                                            )
+                                        }
                                     }
-                                    Text(
-                                        text = previewText,
-                                        style = TextStyle(
-                                            color = previewTextColor,
-                                            fontFamily = FontFamily.Monospace,
-                                            fontSize = (15f * settings.scale).sp,
-                                            shadow = previewShadow,
-                                        ),
-                                        maxLines = 1,
-                                    )
                                 }
                             }
 
@@ -282,11 +334,44 @@ fun SettingsScreen(
                                     modifier = Modifier.size(16.dp),
                                 )
                                 Text(
-                                    text = "Vorschau über Video-App (${settings.overlayStyle.label}" +
-                                        (if (settings.compactOverlayMode) " • Kompakt" else "") +
-                                        (if (settings.overlayPositionLocked) " • Gesperrt" else "") + ")",
+                                    text = "Vorschau: ${settings.overlayContentMode.label} • ${settings.overlayStyle.label}" +
+                                        (if (settings.overlayPositionLocked) " • Gesperrt" else ""),
                                     style = MaterialTheme.typography.labelSmall,
                                     color = Color(0xFF94A3B8),
+                                )
+                            }
+                        }
+                    }
+
+                    // Overlay Content Mode Chips (Smart / Cinema Auto-Hide / Visual Bar / Classic Telemetry)
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(
+                            text = "Overlay-Anzeige (Inhalt)",
+                            style = MaterialTheme.typography.titleMedium,
+                        )
+                        Text(
+                            text = when (settings.overlayContentMode) {
+                                OverlayContentMode.SMART ->
+                                    "Nur Infos, die der S4 nicht kennt: ETA, Hochrechnung, Pace-Trend, Ghost, Wochenziel & Programme."
+                                OverlayContentMode.CINEMA_TOAST ->
+                                    "Minimaler Punkt über der Serie – blendet sich automatisch alle 500 m und bei Programm-Wechseln für 6 s ein."
+                                OverlayContentMode.PROGRESS_BAR ->
+                                    "Schlanker Fortschrittsbalken – mit aktivem Ghost als Live-Rennen (du vs. Ghost) ohne Text lesen zu müssen."
+                                OverlayContentMode.TELEMETRY ->
+                                    "Alle Live-Daten vom S4 (praktisch im dunklen Zimmer, da das S4-Display kein Licht hat)."
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colorScheme.onSurfaceVariant,
+                        )
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            OverlayContentMode.entries.forEach { mode ->
+                                FilterChip(
+                                    selected = settings.overlayContentMode == mode,
+                                    onClick = { onOverlayContentModeChange(mode) },
+                                    label = { Text(mode.label) },
                                 )
                             }
                         }
@@ -370,25 +455,20 @@ fun SettingsScreen(
                     HorizontalDivider(color = colorScheme.outlineVariant.copy(alpha = 0.5f))
 
                     SettingToggleRow(
-                        title = "Ultra-Kompakt-Modus (Kino)",
-                        subtitle = "Zeigt nur Pace & Distanz/Rest – auch direkt im Overlay umschaltbar",
-                        checked = settings.compactOverlayMode,
-                        onCheckedChange = onCompactOverlayChange,
-                    )
-
-                    SettingToggleRow(
                         title = "Overlay-Position sperren",
                         subtitle = "Verhindert versehentliches Verschieben beim Bedienen von Video-Apps",
                         checked = settings.overlayPositionLocked,
                         onCheckedChange = onOverlayLockChange,
                     )
 
-                    SettingToggleRow(
-                        title = "Watt auch in der Mini-Leiste anzeigen",
-                        subtitle = "Im Voll-Modus sichtbar, sonst beim Antippen des Overlays",
-                        checked = settings.showWattsInMini,
-                        onCheckedChange = onShowWattsInMiniChange,
-                    )
+                    if (settings.overlayContentMode == OverlayContentMode.TELEMETRY) {
+                        SettingToggleRow(
+                            title = "Watt auch in der Mini-Leiste anzeigen",
+                            subtitle = "Sonst sichtbar beim Antippen des Overlays",
+                            checked = settings.showWattsInMini,
+                            onCheckedChange = onShowWattsInMiniChange,
+                        )
+                    }
 
                     HorizontalDivider(color = colorScheme.outlineVariant.copy(alpha = 0.5f))
 
